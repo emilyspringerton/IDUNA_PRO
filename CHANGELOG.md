@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-09-03 (4)
+- docs: real scoping pass for kanban priority-queue card WOTAN-997 ("WOTAN account signups via email/password have them confirm the password type it twice have the field like hidden with the eye thing"), applying THE_EMILY_WAY.md's own new Principle 19. New docs/WOTAN_SIGNUP_UI_SCOPING.md. Real, checked-live finding: no email/password signup HTML form exists anywhere in this monorepo today -- register.go's own real POST /api/v1/auth/register API has zero frontend, IDUNA's own portal.go password field is a login form not signup, WOTAN's own tournaments.html signup is email-only (mailing list, no password field), and IDUNA_PRO has no static-file-serving capability at all. Real, phased plan: decide hosting (IDUNA_PRO serves it directly vs WOTAN/okemily.com calls the API cross-origin, a real, small, undecided architectural question), then build the real form (email/password/confirm/show-hide toggle). No code written -- scoped, not swallowed whole.
+
 ## 2026-09-03 (3)
 - feat: cmd/idunapro -- `runHealth` now presents a real `burrowgen.HealthError` (BadStatus/NotOk, a real defenum, PARENA/stdlib/idunapro/cli_mod.prn) instead of a bare error string, via a new `healthErrorMessage` host-side switch on the enum's own real, exported `.Tag` field -- BURROW's Go target still can't `match` on a user defenum itself, so the host does the presentation mapping directly, same real split this CLI's own design already established. Regenerated `internal/burrowgen/idunapro_cli_gen.go` from the updated PARENA source. `go build`/`go test ./...` clean, zero regressions. Live-verified against IDUNA's actual running `:8080` (healthy -> exit 0) and an unreachable host (exit 1). (sess-20260902-2008-ed50169e)
 
