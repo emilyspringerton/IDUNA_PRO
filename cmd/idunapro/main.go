@@ -73,7 +73,22 @@ func runHealth(baseURL string) int {
 	if outcome.Tag == 1 {
 		fmt.Println(outcome.Value.(string))
 	} else {
-		fmt.Fprintln(os.Stderr, outcome.Value.(string))
+		fmt.Fprintln(os.Stderr, healthErrorMessage(outcome.Value.(burrowgen.HealthError)))
 	}
 	return int(burrowgen.ExitCodeForHealth(int32(resp.StatusCode), body.OK))
+}
+
+// healthErrorMessage — real, host-side presentation for a real burrowgen.HealthError (BURROW's
+// own current v0 boundary: its Go target can't `match` on a user defenum's own variant yet, only
+// Result/Option's fixed Ok/Err/Some/None tags, so the host reads the real, exported Tag field
+// directly). PARENA decides WHICH error happened; this function decides WHAT to print for it.
+func healthErrorMessage(e burrowgen.HealthError) string {
+	switch e.Tag {
+	case 0:
+		return "unexpected HTTP status (real endpoint responded, but not with 200)"
+	case 1:
+		return "endpoint responded 200 but its own body reported not-ok"
+	default:
+		return "unknown health error"
+	}
 }

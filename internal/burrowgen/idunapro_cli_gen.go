@@ -12,14 +12,27 @@ type Option struct {
 	Value any
 }
 
+type HealthError struct {
+	Tag   int
+	Value any
+}
+
+func HealthError_BadStatus() HealthError {
+	return HealthError{Tag: 0}
+}
+
+func HealthError_NotOk() HealthError {
+	return HealthError{Tag: 1}
+}
+
 func InterpretHealthResponse(status_code int32, body_ok bool) Result {
 	return func() any {
 		if !(status_code == 200) {
-			return Result(Result{Tag: 0, Value: "unexpected HTTP status (real endpoint responded, but not with 200)"})
+			return Result(Result{Tag: 0, Value: HealthError_BadStatus()})
 		}
 		return Result(func() any {
 			if !(body_ok) {
-				return Result(Result{Tag: 0, Value: "endpoint responded 200 but its own body reported not-ok"})
+				return Result(Result{Tag: 0, Value: HealthError_NotOk()})
 			}
 			return Result(Result{Tag: 1, Value: "IDUNA_PRO instance is healthy"})
 		}().(Result))
@@ -34,7 +47,7 @@ func ExitCodeForHealth(status_code int32, body_ok bool) int32 {
 			_ = message
 			return int32(0)
 		} else {
-			message := __match_tmp_1.Value.(string)
+			message := __match_tmp_1.Value.(HealthError)
 			_ = message
 			return int32(1)
 		}
