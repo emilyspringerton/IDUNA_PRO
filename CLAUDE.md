@@ -19,6 +19,13 @@ yet**: `/api/v1/identities/me` doesn't resolve a local-auth JWT's subject (`loca
 inherited from IDUNA itself, matters more here since this product leans on self-serve/local
 auth. See `README.md`'s own section on this.
 
+**Real, shipped (2026-09-03, S243-08)**: the kanban board — generalized, DB-backed, reachable
+via both a cookie-authenticated browser UI (`/admin/kanban`) and a bearer-token API
+(`/api/v1/kanban/cards`) against the same handler. Optional markdown-file sync via
+`BACKLOG_PATH` (unset by default — pure DB-backed board otherwise). Live-verified end to end:
+card create/list/done via the bearer API, card create via the cookie session, real Apple filed
+on a "done" move.
+
 Not yet built: the extensibility hook contract (PARENA mods via `burrow build`), a docs site,
 an online editor, `console.okemily.com`, or the tenant-provisioning control plane (all real,
 separately scoped in the NORTHSTAR doc above).

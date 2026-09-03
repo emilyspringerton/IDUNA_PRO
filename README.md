@@ -42,12 +42,31 @@ product built on self-serve/local auth (not Google OAuth) will hit it immediatel
 next step: unify the local-user and OAuth-user identity models, or teach `/me` to dispatch on
 the `local:` prefix.
 
+## Kanban board — human/agent interop
+
+`internal/backlog`/`kanban.go`/`kanban_page.go`/`kanban_inbox.go` are here, generalized: a real,
+DB-backed board (drag-and-drop + click-to-reorder columns, S207-68) reachable two ways against
+the exact same handler — a human via the cookie-authenticated `/admin/kanban` browser UI, or an
+agent via the bearer-token `/api/v1/kanban/cards` API (`kanban.access` permission). One shared
+code path, two real entry points — the actual point of this being a core integration surface.
+
+`BACKLOG_PATH` unset (this binary's own default) means a pure, generic board: no markdown sync,
+no Inbox pane, no auto-archive-on-done — just cards, columns, and positions. Set `BACKLOG_PATH`
+to opt into syncing against your own markdown-checkbox file (`- [ ] **ID: title**` lines) — the
+same real parser IDUNA itself uses against `EMILY/BACKLOG.md`, just pointed at your own file. A
+"done" move always files a real Apple (`backlog_completion`), tagged with `KANBAN_SOURCE_REPO_NAME`
+if set (defaults to `"kanban"`).
+
+`admin_login.go` came along with the kanban board — it turned out not to import
+`internal/mailinglist` at all (checked directly), so the board's own cookie-session login page
+didn't need inventing from scratch.
+
 ## What's deliberately NOT here
 
-Per the real extraction plan's own categorization: the Back Office admin UI, developer portal,
-blog/tyler/promptoverse/mailinglist/drive/vault, every game-specific handler (mmo/redgarden/
-shankpit/papercraft/racer), the kanban-over-BACKLOG.md bridge, HEIMDAL, push tokens. Each of
-these is a real, later, separate decision — not silently dropped.
+Per the real extraction plan's own categorization: the rest of the Back Office admin UI (user/
+role management pages), the developer portal, blog/tyler/promptoverse/mailinglist/drive/vault,
+every game-specific handler (mmo/redgarden/shankpit/papercraft/racer), HEIMDAL, push tokens.
+Each of these is a real, later, separate decision — not silently dropped.
 
 ## Extensibility — real plan, not yet built
 
@@ -64,4 +83,6 @@ SQLITE_PATH=./var/iduna.db ./idunapro   # embedded SQLite, migrations run automa
 ```
 
 Env vars mirror IDUNA's own (`JWT_ISSUER`, `BASE_URL`, `GOOGLE_CLIENT_ID`, `KEY_FILE`,
-`IDUNA_HEC_TOKEN`, `APPLES_GIT_DIR`, `ADDR`, default `:8081`).
+`IDUNA_HEC_TOKEN`, `APPLES_GIT_DIR`, `ADDR`, default `:8081`) plus two new to this repo:
+`BACKLOG_PATH` (kanban markdown sync, unset by default) and `KANBAN_SOURCE_REPO_NAME` (Apple
+`source_repo` label for kanban "done" moves, defaults to `"kanban"`).

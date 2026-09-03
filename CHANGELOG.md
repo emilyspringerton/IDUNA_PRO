@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-09-03 (2)
+
+- S243-08: real kanban board added, generalized as a human/agent integration point. Founder
+  real-time: "build the kanban into IDUNA_PRO its a good affordance for interop between human
+  and agents - we will probably build tools on top of the IDUNA_PRO like this is one of the
+  core integration points." Copied `internal/backlog` (a real, generic markdown-checkbox parser
+  — takes any file path, not hardcoded to `EMILY/BACKLOG.md`) and `kanban.go`/`kanban_page.go`/
+  `kanban_inbox.go` verbatim: every BACKLOG.md-specific behavior (bare-section resolution, git
+  auto-commit, Inbox sync) was already gated behind an empty-string check on `BacklogPath` in
+  the source — confirmed by reading the code, not assumed — so leaving `BACKLOG_PATH` unset
+  (this binary's own default) yields a pure, generic, DB-backed board with zero markdown
+  coupling. Two real fixes for genuine product-context gaps found: (1) `fileCompletionApple`
+  hardcoded `SourceRepo: "EMILY"` — now a real, configurable `KANBAN_SOURCE_REPO_NAME` env var,
+  defaulting to `"kanban"`; (2) the board's own user-visible copy text and the Inbox pane's
+  503-not-configured message were rewritten to be product-neutral instead of naming EMILY/
+  BACKLOG.md. `admin_login.go` came along too — checked its imports directly and found it does
+  NOT depend on `internal/mailinglist` (only `auth/jwt`, `store`, `userlog`, all already core),
+  unlike `admin.go` itself — so the board's real cookie-session login page didn't need
+  inventing from scratch. Two new core migrations (`kanban_cards`, `kanban_access_permission`),
+  both self-contained SQLite DDL. `go build/vet/test ./...` clean. **Live-verified end to end**:
+  booted the real binary, minted a real agent JWT with `kanban.access`, created/listed/moved a
+  card to Done via the bearer API — confirmed the resulting Apple's `source_repo` reads `kanban`
+  (not `EMILY`) and the card was actually removed from the table; separately logged in via
+  `/admin/login` (real cookie session), loaded the real `/admin/kanban` page (S207-68's own
+  drag-sort JS intact), and created a card through the cookie-authenticated admin API — the same
+  underlying handler serving both a human and an agent caller, the actual point of this feature.
+  (sess-20260902-2008-ed50169e)
+
 ## 2026-09-03
 
 - Real V0: extracted from `IDUNA` per founder direction ("we pull some of the more custom stuff

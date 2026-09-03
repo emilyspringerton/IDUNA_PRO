@@ -6,11 +6,21 @@
 // IDUNA_PRO"), from the real, checked categorization in
 // IDUNA/docs/EMILY_FOR_BUSINESS_NORTHSTAR.md's own "IDUNA_PRO — a real extraction plan" section.
 //
-// Deliberately NOT here (see that NORTHSTAR doc for the full list and reasoning): the Back
-// Office admin UI (`admin.go`/`admin_login.go`, coupled to internal/mailinglist), the developer
-// portal, blog/tyler/promptoverse/mailinglist/drive/vault, every game-specific handler
-// (mmo/redgarden/shankpit/papercraft/racer), kanban-over-BACKLOG.md, HEIMDAL, push tokens. Each
-// is a real, later, separate decision -- not silently dropped, just not extracted yet.
+// Deliberately NOT here (see that NORTHSTAR doc for the full list and reasoning): the full Back
+// Office admin UI (`admin.go`, coupled to internal/mailinglist), the developer portal,
+// blog/tyler/promptoverse/mailinglist/drive/vault, every game-specific handler
+// (mmo/redgarden/shankpit/papercraft/racer), HEIMDAL, push tokens. Each is a real, later,
+// separate decision -- not silently dropped, just not extracted yet.
+//
+// The kanban board (S243-08, founder real-time: "build the kanban into IDUNA_PRO its a good
+// affordance for interop between human and agents... one of the core integration points") IS
+// here, generalized: `internal/backlog`/`kanban.go`/`kanban_page.go`/`kanban_inbox.go` are real,
+// checked-generic (they parse ANY markdown-checkbox file at a configurable path, not
+// EMILY/BACKLOG.md specifically) and copied verbatim. `admin_login.go` came along too -- it
+// turned out NOT to import internal/mailinglist at all (only auth/jwt, store, userlog, all
+// already core), so the kanban board's own real cookie-session login page didn't need to be
+// invented from scratch. `BACKLOG_PATH` unset (this binary's own default) means a pure,
+// generic, DB-backed board with no markdown sync at all -- opt into sync only if you want it.
 //
 // One real, structural, honestly-named gap inherited from the source repo, not solved here:
 // store.IAMStore is one large interface spanning every feature (including ones NOT extracted,
@@ -141,6 +151,19 @@ func main() {
 	localAuthH := &handlers.LocalAuthHandler{Keys: keys, Proj: userProj, Issuer: issuer, EventLog: unifiedLog}
 	registerH := &handlers.RegisterHandler{Keys: keys, Log: uel, Proj: userProj, Store: iamStore, Issuer: issuer}
 	logsH := &handlers.LogsHandler{Store: unifiedLog, HECToken: getenv("IDUNA_HEC_TOKEN", "")}
+	adminLoginH := &handlers.AdminLoginHandler{Store: iamStore, Keys: keys, Issuer: issuer, EventLog: unifiedLog}
+
+	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
+	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
+	backlogPath := os.Getenv("BACKLOG_PATH")
+	kanbanH := &handlers.KanbanHandler{
+		DB:             db,
+		BacklogPath:    backlogPath,
+		Store:          iamStore,
+		ApplesGitDir:   os.Getenv("APPLES_GIT_DIR"),
+		SourceRepoName: getenv("KANBAN_SOURCE_REPO_NAME", ""),
+	}
+	kanbanInboxH := &handlers.KanbanInboxHandler{DB: db, BacklogPath: backlogPath}
 
 	mux := http.NewServeMux()
 
@@ -172,6 +195,24 @@ func main() {
 	deviceH.Register(mux)
 
 	handlers.RegisterLogsRoutes(mux, logsH, keys)
+
+	// Admin login (cookie session) -- public, needed so the browser can reach it at all.
+	mux.Handle("/admin/login", adminLoginH)
+	mux.Handle("/admin/logout", adminLoginH)
+
+	// Kanban board: browser UI (cookie-auth, iduna.admin) and bearer-API (kanban.access) both
+	// share the SAME KanbanHandler instance -- one real code path for the actual card
+	// operations, two real entry points (a human via the browser, an agent via the API), which
+	// is the whole real point of this being "a core integration point" between the two.
+	kanbanPageProtected := middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(&handlers.KanbanPageHandler{}))
+	mux.Handle("/admin/kanban", kanbanPageProtected)
+	kanbanAdminAPIProtected := middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(kanbanH))
+	mux.Handle("/admin/kanban/api/cards", kanbanAdminAPIProtected)
+	mux.Handle("/admin/kanban/api/cards/", kanbanAdminAPIProtected)
+	mux.Handle("/admin/kanban/api/inbox", middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(kanbanInboxH)))
+	kanbanAPIProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("kanban.access")(kanbanH))
+	mux.Handle("/api/v1/kanban/cards", kanbanAPIProtected)
+	mux.Handle("/api/v1/kanban/cards/", kanbanAPIProtected)
 
 	// Replay unapplied user events on startup (same real, established pattern IDUNA itself uses).
 	if err := userlog.ReplayUnapplied(context.Background(), uel, userProj); err != nil {
