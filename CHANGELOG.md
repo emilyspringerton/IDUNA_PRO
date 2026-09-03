@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-03 (2)
+- feat: cmd/idunapro -- real, honest v0 CLI proof-of-concept for kanban cruise-queue card 9988 ('emily for business CLI written in GO with BURROW'). One real subcommand, 'idunapro health <base-url>': the real HTTP GET + JSON parse stays here (Go host), but the actual decision (what a health-check response means, what exit code it earns) is real PARENA source (PARENA/stdlib/idunapro/cli_mod.prn) compiled via 'burrow build -o *.go' into internal/burrowgen/idunapro_cli_gen.go -- the first real proof this session's own newly-shipped match/Result BURROW port works end to end both constructing AND consuming a Result. No cgo/FFI boundary, same real precedent DUNG's own burrowgen usage set. Live-verified against IDUNA's actual running :8080 instance (healthy -> exit 0) and an unreachable host (exit 1). go test ./... all green, zero regressions. Real, honest scope: one subcommand, not a CLI framework -- BURROW's Go target still needs defenum/loop/Vec/struct construction before a fuller CLI is worth building. (sess-20260902-2008-ed50169e)
 
 - S243-08: real kanban board added, generalized as a human/agent integration point. Founder
   real-time: "build the kanban into IDUNA_PRO its a good affordance for interop between human
