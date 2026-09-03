@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-09-03 (5)
+- feat: cmd/idunapro's health check simplified -- HealthMessage/HealthExitCode (compiled from
+  PARENA/stdlib/idunapro/cli_mod.prn's new HealthStatus enum design, BURROW commit dd406c5)
+  replace InterpretHealthResponse/ExitCodeForHealth wholesale. The old design needed
+  healthErrorMessage, a Go-side switch reading a real burrowgen.HealthError's exported .Tag
+  field directly, since BURROW's Go target couldn't match on a user defenum's own variant yet --
+  that workaround is gone entirely now that it can. runHealth is now a pure "fetch bytes, print
+  what PARENA decided" shell: PARENA owns the pass/fail decision AND the presentation message.
+  internal/burrowgen/idunapro_cli_gen.go regenerated via a real `burrow build`; its own test
+  file updated to match the new function names (TestClassifyHealth/TestHealthMessage/
+  TestHealthExitCode). `go build/vet/test ./...` all clean. Live-verified against IDUNA's
+  actual running :8080 (healthy -> exit 0, "IDUNA_PRO instance is healthy") and an unreachable
+  host (exit 1). session: sess-20260902-2008-ed50169e
+
 ## 2026-09-03 (4)
 - docs: real scoping pass for kanban priority-queue card WOTAN-997 ("WOTAN account signups via email/password have them confirm the password type it twice have the field like hidden with the eye thing"), applying THE_EMILY_WAY.md's own new Principle 19. New docs/WOTAN_SIGNUP_UI_SCOPING.md. Real, checked-live finding: no email/password signup HTML form exists anywhere in this monorepo today -- register.go's own real POST /api/v1/auth/register API has zero frontend, IDUNA's own portal.go password field is a login form not signup, WOTAN's own tournaments.html signup is email-only (mailing list, no password field), and IDUNA_PRO has no static-file-serving capability at all. Real, phased plan: decide hosting (IDUNA_PRO serves it directly vs WOTAN/okemily.com calls the API cross-origin, a real, small, undecided architectural question), then build the real form (email/password/confirm/show-hide toggle). No code written -- scoped, not swallowed whole.
 

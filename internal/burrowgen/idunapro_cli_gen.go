@@ -12,43 +12,58 @@ type Option struct {
 	Value any
 }
 
-type HealthError struct {
+type HealthStatus struct {
 	Tag   int
 	Value any
 }
 
-func HealthError_BadStatus() HealthError {
-	return HealthError{Tag: 0}
+func HealthStatus_Healthy() HealthStatus {
+	return HealthStatus{Tag: 0}
 }
 
-func HealthError_NotOk() HealthError {
-	return HealthError{Tag: 1}
+func HealthStatus_BadStatus() HealthStatus {
+	return HealthStatus{Tag: 1}
 }
 
-func InterpretHealthResponse(status_code int32, body_ok bool) Result {
+func HealthStatus_NotOk() HealthStatus {
+	return HealthStatus{Tag: 2}
+}
+
+func ClassifyHealth(status_code int32, body_ok bool) HealthStatus {
 	return func() any {
 		if !(status_code == 200) {
-			return Result(Result{Tag: 0, Value: HealthError_BadStatus()})
+			return HealthStatus(HealthStatus_BadStatus())
 		}
-		return Result(func() any {
+		return HealthStatus(func() any {
 			if !(body_ok) {
-				return Result(Result{Tag: 0, Value: HealthError_NotOk()})
+				return HealthStatus(HealthStatus_NotOk())
 			}
-			return Result(Result{Tag: 1, Value: "IDUNA_PRO instance is healthy"})
-		}().(Result))
-	}().(Result)
+			return HealthStatus(HealthStatus_Healthy())
+		}().(HealthStatus))
+	}().(HealthStatus)
 }
 
-func ExitCodeForHealth(status_code int32, body_ok bool) int32 {
+func HealthMessage(status_code int32, body_ok bool) string {
 	return func() any {
-		__match_tmp_1 := InterpretHealthResponse(status_code, body_ok)
-		if __match_tmp_1.Tag == 1 {
-			message := __match_tmp_1.Value.(string)
-			_ = message
-			return int32(0)
+		__match_tmp_1 := ClassifyHealth(status_code, body_ok)
+		if __match_tmp_1.Tag == 0 {
+			return string("IDUNA_PRO instance is healthy")
+		} else if __match_tmp_1.Tag == 1 {
+			return string("unexpected HTTP status (real endpoint responded, but not with 200)")
 		} else {
-			message := __match_tmp_1.Value.(HealthError)
-			_ = message
+			return string("endpoint responded 200 but its own body reported not-ok")
+		}
+	}().(string)
+}
+
+func HealthExitCode(status_code int32, body_ok bool) int32 {
+	return func() any {
+		__match_tmp_2 := ClassifyHealth(status_code, body_ok)
+		if __match_tmp_2.Tag == 0 {
+			return int32(0)
+		} else if __match_tmp_2.Tag == 1 {
+			return int32(1)
+		} else {
 			return int32(1)
 		}
 	}().(int32)

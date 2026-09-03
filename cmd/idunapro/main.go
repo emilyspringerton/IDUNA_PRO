@@ -3,10 +3,10 @@
 // BURROW"). Real "mods first everything" split: this Go host owns everything BURROW's Go
 // emission target genuinely can't do yet -- os.Args parsing, the real HTTP call to a customer's
 // own IDUNA_PRO instance, stdout/stderr, process exit codes. The actual DECISION logic (what a
-// health-check response means, what exit code it earns) is real PARENA source
-// (PARENA/stdlib/idunapro/cli_mod.prn), compiled via `burrow build ... -o *.go` into
-// internal/burrowgen/idunapro_cli_gen.go and called directly here -- no cgo/FFI boundary, the
-// same real precedent DUNG's own burrowgen usage already established.
+// health-check response means, what exit code it earns, and what message to print) is real
+// PARENA source (PARENA/stdlib/idunapro/cli_mod.prn), compiled via `burrow build ... -o *.go`
+// into internal/burrowgen/idunapro_cli_gen.go and called directly here -- no cgo/FFI boundary,
+// the same real precedent DUNG's own burrowgen usage already established.
 //
 // Real, honest v0 scope: one subcommand, `idunapro health <base-url>`. Growing this into a
 // fuller CLI (auth, kanban, apples, subscriptions...) is real, separate, later work -- this is
@@ -54,9 +54,16 @@ type healthBody struct {
 }
 
 // runHealth makes the real HTTP GET, then hands the real decision -- what to print, what exit
-// code to return -- to the PARENA-compiled ExitCodeForHealth/InterpretHealthResponse pair. This
+// code to return -- entirely to the PARENA-compiled HealthMessage/HealthExitCode pair. This
 // host does no interpretation of its own beyond parsing the wire response into the two scalars
 // the PARENA decision function actually needs (status code, body-ok flag).
+//
+// Real, third-pass simplification (2026-09-03, cruise-queue card 9988's own next-named
+// prerequisite, closed the same day it was named): BURROW's Go target just shipped real
+// `match`-on-a-user-defenum support, so PARENA can now decide the presentation message too, not
+// just the pass/fail outcome -- the prior Result/HealthError design (and this host's own
+// healthErrorMessage Tag-reading workaround) is gone. This function is now a pure "fetch bytes,
+// print what PARENA decided" shell.
 func runHealth(baseURL string) int {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(baseURL + "/health")
@@ -69,26 +76,13 @@ func runHealth(baseURL string) int {
 	var body healthBody
 	_ = json.NewDecoder(resp.Body).Decode(&body) // a real non-200/malformed body just leaves OK false
 
-	outcome := burrowgen.InterpretHealthResponse(int32(resp.StatusCode), body.OK)
-	if outcome.Tag == 1 {
-		fmt.Println(outcome.Value.(string))
+	statusCode := int32(resp.StatusCode)
+	message := burrowgen.HealthMessage(statusCode, body.OK)
+	exitCode := burrowgen.HealthExitCode(statusCode, body.OK)
+	if exitCode == 0 {
+		fmt.Println(message)
 	} else {
-		fmt.Fprintln(os.Stderr, healthErrorMessage(outcome.Value.(burrowgen.HealthError)))
+		fmt.Fprintln(os.Stderr, message)
 	}
-	return int(burrowgen.ExitCodeForHealth(int32(resp.StatusCode), body.OK))
-}
-
-// healthErrorMessage — real, host-side presentation for a real burrowgen.HealthError (BURROW's
-// own current v0 boundary: its Go target can't `match` on a user defenum's own variant yet, only
-// Result/Option's fixed Ok/Err/Some/None tags, so the host reads the real, exported Tag field
-// directly). PARENA decides WHICH error happened; this function decides WHAT to print for it.
-func healthErrorMessage(e burrowgen.HealthError) string {
-	switch e.Tag {
-	case 0:
-		return "unexpected HTTP status (real endpoint responded, but not with 200)"
-	case 1:
-		return "endpoint responded 200 but its own body reported not-ok"
-	default:
-		return "unknown health error"
-	}
+	return int(exitCode)
 }
