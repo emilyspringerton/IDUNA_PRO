@@ -1,0 +1,4 @@
+/var/
+*.db
+idunapro-key.json
+/idunapro
