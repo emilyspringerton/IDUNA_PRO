@@ -20,13 +20,14 @@ import (
 // LocalLogin) without a real SQL projector.
 type stubUserProjector struct {
 	byEmail map[string]*userlog.LocalUser
+	byUID   map[int]*userlog.LocalUser // real, added for TestMeHandler's own local-auth /me tests
 }
 
-func (s *stubUserProjector) Apply(context.Context, userlog.Record) error       { return nil }
-func (s *stubUserProjector) Cursor(context.Context) (uint64, error)            { return 0, nil }
-func (s *stubUserProjector) AdvanceCursor(context.Context, uint64) error       { return nil }
-func (s *stubUserProjector) GetByUID(context.Context, int) (*userlog.LocalUser, error) {
-	return nil, nil
+func (s *stubUserProjector) Apply(context.Context, userlog.Record) error { return nil }
+func (s *stubUserProjector) Cursor(context.Context) (uint64, error)      { return 0, nil }
+func (s *stubUserProjector) AdvanceCursor(context.Context, uint64) error { return nil }
+func (s *stubUserProjector) GetByUID(_ context.Context, uid int) (*userlog.LocalUser, error) {
+	return s.byUID[uid], nil
 }
 func (s *stubUserProjector) GetByEmail(_ context.Context, email string) (*userlog.LocalUser, error) {
 	return s.byEmail[email], nil
@@ -137,7 +138,9 @@ func TestLocalAuthHandler_Webmaster_GetsKanbanAccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("login: status = %d, want 200, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp struct{ Token string `json:"token"` }
+	var resp struct {
+		Token string `json:"token"`
+	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -170,7 +173,9 @@ func TestLocalAuthHandler_RegularUser_DoesNotGetKanbanAccess(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("login: status = %d, want 200, body = %s", rr.Code, rr.Body.String())
 	}
-	var resp struct{ Token string `json:"token"` }
+	var resp struct {
+		Token string `json:"token"`
+	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}

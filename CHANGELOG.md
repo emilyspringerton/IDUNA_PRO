@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-04 (2)
+- fix(identities/me): real, found-live gap closed (cruise-queue card 9988, the real, standing
+  blocker on the `idunapro whoami` CLI subcommand) -- `GET /api/v1/identities/me` 404'd
+  unconditionally for every local-auth session. Root cause, checked directly: a local-auth
+  JWT's `sub` is `"local:<uid>"` (`LocalAuthHandler`'s own convention), but `MeHandler` always
+  called `h.Store.GetUserByID(ctx, sub)`, which queries the separate `users` table by its own
+  real `id` column -- local-auth accounts live in `local_users` instead (a real, separate
+  projection, confirmed directly), and have never had a row in `users` at all. Fixed:
+  `MeHandler` now branches on a `"local:"` prefix, resolving through the same
+  `userlog.UserProjector.GetByUID` the login handler itself already uses, and builds the same
+  real `identity`/`rbac`/`meta` response shape from the real `LocalUser` row +
+  `localUserPermissions` (the exact webmaster-kanban-access fix from earlier this session).
+  4 new tests (real identity resolution, unknown UID 404, webmaster's own kanban.access showing
+  up, and a nil-projector 404-not-panic guard). `go build`/`go vet`/`go test ./...` clean across
+  the whole repo, `gofmt` clean. Live-verified end to end against a real, freshly-booted
+  instance (fresh SQLite DB, real `/api/v1/auth/register` + `/api/v1/auth/local`, real
+  `/api/v1/identities/me` call) -- not just unit tests: the real local user's own email,
+  gamertag, status, and permissions all came back correctly, where this previously 404'd
+  unconditionally. This was the real, named, standing blocker on the `idunapro whoami` CLI
+  subcommand (cruise-queue card 9988) -- that subcommand itself is real, separate, still
+  unbuilt follow-up, not shipped in this same pass.
+
 ## 2026-09-04 (1)
 - feat(cmd/idunapro): two new real subcommands, `login` and `kanban list` (cruise-queue card
   9988, "the fuller multi-subcommand CLI itself" -- the gap every prior status update on this

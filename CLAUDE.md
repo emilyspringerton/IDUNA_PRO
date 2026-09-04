@@ -14,10 +14,11 @@ that doc's own "real, decisive, checked difference" note).
 
 Real V0, live-verified (not just `go build`/`go test`): boots against a fresh SQLite file,
 migrations run clean, `/health`/`/.well-known/jwks.json`/`/api/v1/auth/register`/
-`/api/v1/auth/local` all confirmed working end to end. **Real, honest, found gap, not fixed
-yet**: `/api/v1/identities/me` doesn't resolve a local-auth JWT's subject (`local:<N>`) —
-inherited from IDUNA itself, matters more here since this product leans on self-serve/local
-auth. See `README.md`'s own section on this.
+`/api/v1/auth/local`/`/api/v1/identities/me` all confirmed working end to end. **Real gap fixed
+2026-09-04**: `/api/v1/identities/me` used to 404 unconditionally for a local-auth JWT's
+subject (`local:<N>`) — inherited from IDUNA itself. Fixed by teaching `MeHandler` to resolve
+`local:` subjects through the real `userlog.UserProjector`, same lookup the login handler
+already uses. See `README.md`'s own section on this.
 
 **Real, shipped (2026-09-03, S243-08)**: the kanban board — generalized, DB-backed, reachable
 via both a cookie-authenticated browser UI (`/admin/kanban`) and a bearer-token API

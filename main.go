@@ -142,7 +142,7 @@ func main() {
 
 	googleAuthH := &handlers.GoogleAuthHandler{GoogleClientID: googleClientID, Keys: keys, Store: iamStore, Issuer: issuer, EventLog: unifiedLog}
 	agentAuthH := &handlers.AgentAuthHandler{Keys: keys, Store: iamStore, Issuer: issuer, EventLog: unifiedLog}
-	meH := &handlers.MeHandler{Store: iamStore, Authority: baseURL}
+	meH := &handlers.MeHandler{Store: iamStore, Proj: userProj, Authority: baseURL}
 	jwksH := &handlers.JWKSHandler{Keys: keys}
 	healthH := &handlers.HealthHandler{}
 	applesH := &handlers.ApplesHandler{Store: iamStore, ApplesGitDir: os.Getenv("APPLES_GIT_DIR"), EventLog: unifiedLog}

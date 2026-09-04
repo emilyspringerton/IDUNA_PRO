@@ -31,16 +31,17 @@ fresh SQLite file, confirmed `/health`, `/.well-known/jwks.json` (a real ES256 k
 self-serve `POST /api/v1/auth/register` issuing a real JWT, and `POST /api/v1/auth/local`
 correctly rejecting bad credentials.
 
-## Real, honest, found gap — not fixed here
+## Real gap, fixed (2026-09-04, cruise-queue card 9988)
 
-`GET /api/v1/identities/me` looks up a subject by `store.GetUserByID`, which only understands
-Google-OAuth-style UUID user IDs — a local-auth JWT's subject (`local:<N>`) doesn't resolve,
-so a self-serve-registered user currently gets `404 identity not found` from `/me`. This is a
-**pre-existing gap inherited from IDUNA itself**, not introduced by this extraction (confirmed
-by reading `store.GetUserByID`'s own implementation) — but it matters more here, since a real
-product built on self-serve/local auth (not Google OAuth) will hit it immediately. Real, named
-next step: unify the local-user and OAuth-user identity models, or teach `/me` to dispatch on
-the `local:` prefix.
+`GET /api/v1/identities/me` used to look up every subject via `store.GetUserByID`, which only
+understands Google-OAuth-style UUID user IDs — a local-auth JWT's subject (`local:<N>`) never
+resolved, so a self-serve-registered user got `404 identity not found` from `/me`
+unconditionally. Real root cause, confirmed by reading both stores directly: local-auth
+accounts live in the separate `local_users` projection, not the `users` table `GetUserByID`
+queries — they never had a row there at all. Fixed: `MeHandler` now dispatches on a `local:`
+prefix and resolves through `userlog.UserProjector.GetByUID` instead, the same real lookup the
+login handler itself already uses. Live-verified end to end against a real, freshly-booted
+instance (real register → real login → real `/me`), not just unit tests.
 
 ## Kanban board — human/agent interop
 
