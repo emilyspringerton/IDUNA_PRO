@@ -72,6 +72,12 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
+	case "whoami":
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "usage: idunapro whoami <base-url> <token>")
+			os.Exit(2)
+		}
+		os.Exit(runWhoami(os.Args[2], os.Args[3]))
 	default:
 		usage()
 		os.Exit(2)
@@ -82,6 +88,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: idunapro health <base-url>")
 	fmt.Fprintln(os.Stderr, "       idunapro login <base-url> <email> <password>")
 	fmt.Fprintln(os.Stderr, "       idunapro kanban list <base-url> <token> [queue]")
+	fmt.Fprintln(os.Stderr, "       idunapro whoami <base-url> <token>")
 }
 
 // healthBody mirrors IDUNA/IDUNA_PRO's own real /health endpoint response shape
@@ -232,4 +239,70 @@ func runKanbanList(baseURL, token, queue string) int {
 	}
 	tw.Flush()
 	return 0
+}
+
+// meResponse mirrors handlers.MeHandler's own real GET /api/v1/identities/me response shape.
+type meResponse struct {
+	Identity struct {
+		ID       string `json:"id"`
+		Email    string `json:"email"`
+		Gamertag string `json:"gamertag"`
+		Status   string `json:"status"`
+	} `json:"identity"`
+	RBAC struct {
+		AssignedRoles        []string `json:"assigned_roles"`
+		EffectivePermissions []string `json:"effective_permissions"`
+	} `json:"rbac"`
+}
+
+// runWhoami (cruise-queue card 9988, real, now-unblocked next subcommand): pure fetch-and-print
+// against GET /api/v1/identities/me, same real "no ambiguous response to interpret" reasoning
+// runKanbanList's own header comment already gives for staying Go-native -- there's no PARENA
+// decision to make here, just a real HTTP call and a real, readable summary of what came back.
+// Was blocked until MeHandler learned to resolve a local-auth "local:<uid>" subject for real
+// (this same session's own fix) -- every local-auth token this CLI's own `login` subcommand
+// mints would have gotten a bare 404 before that.
+func runWhoami(baseURL, token string) int {
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/api/v1/identities/me", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "idunapro: internal error building request: %v\n", err)
+		return 1
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "idunapro: could not reach %s: %v\n", baseURL, err)
+		return 1
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "idunapro: whoami failed (HTTP %d) -- check the token\n", resp.StatusCode)
+		return 1
+	}
+	var me meResponse
+	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+		fmt.Fprintf(os.Stderr, "idunapro: could not parse identity response: %v\n", err)
+		return 1
+	}
+	fmt.Printf("id:          %s\n", me.Identity.ID)
+	fmt.Printf("email:       %s\n", me.Identity.Email)
+	fmt.Printf("gamertag:    %s\n", me.Identity.Gamertag)
+	fmt.Printf("status:      %s\n", me.Identity.Status)
+	fmt.Printf("roles:       %s\n", joinOrNone(me.RBAC.AssignedRoles))
+	fmt.Printf("permissions: %s\n", joinOrNone(me.RBAC.EffectivePermissions))
+	return 0
+}
+
+func joinOrNone(items []string) string {
+	if len(items) == 0 {
+		return "(none)"
+	}
+	out := items[0]
+	for _, s := range items[1:] {
+		out += ", " + s
+	}
+	return out
 }

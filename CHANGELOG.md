@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-04 (3)
+- feat(cmd/idunapro): new `idunapro whoami <base-url> <token>` subcommand (cruise-queue card
+  9988) -- real, now-unblocked next step, closed the same session as the `/api/v1/identities/me`
+  local-auth fix above (every `login`-minted local-auth token would have gotten a bare 404 from
+  `whoami` before that fix landed). Pure fetch-and-print against the real `/me` endpoint, same
+  "no ambiguous response to interpret" reasoning `kanban list` already established for staying
+  entirely Go-native, no new PARENA decision function needed. 4 new tests (success, unauthorized,
+  unreachable, the `joinOrNone` formatting helper). `go build`/`go vet`/`go test ./...` clean,
+  `gofmt` clean. Live-verified with the actual compiled binary against a real, freshly-booted
+  instance: real register → real `idunapro login` → real `idunapro whoami`, correct identity
+  printed.
+
 ## 2026-09-04 (2)
 - fix(identities/me): real, found-live gap closed (cruise-queue card 9988, the real, standing
   blocker on the `idunapro whoami` CLI subcommand) -- `GET /api/v1/identities/me` 404'd

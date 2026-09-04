@@ -102,3 +102,55 @@ func TestRunKanbanList_Unreachable_ReturnsNonZero(t *testing.T) {
 		t.Fatal("expected a non-zero exit code for an unreachable host")
 	}
 }
+
+func TestRunWhoami_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/identities/me" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer real-token" {
+			t.Fatalf("expected real bearer token, got %q", r.Header.Get("Authorization"))
+		}
+		var resp meResponse
+		resp.Identity.ID = "local:1"
+		resp.Identity.Email = "alice@example.com"
+		resp.Identity.Gamertag = "alice"
+		resp.Identity.Status = "active"
+		resp.RBAC.EffectivePermissions = []string{"iduna.me.read", "kanban.access"}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	code := runWhoami(srv.URL, "real-token")
+	if code != 0 {
+		t.Fatalf("expected exit code 0, got %d", code)
+	}
+}
+
+func TestRunWhoami_Unauthorized_ReturnsNonZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	code := runWhoami(srv.URL, "bad-token")
+	if code == 0 {
+		t.Fatal("expected a non-zero exit code for an unauthorized request")
+	}
+}
+
+func TestRunWhoami_Unreachable_ReturnsNonZero(t *testing.T) {
+	code := runWhoami("http://127.0.0.1:1", "real-token")
+	if code == 0 {
+		t.Fatal("expected a non-zero exit code for an unreachable host")
+	}
+}
+
+func TestJoinOrNone(t *testing.T) {
+	if got := joinOrNone(nil); got != "(none)" {
+		t.Fatalf("joinOrNone(nil) = %q, want (none)", got)
+	}
+	if got := joinOrNone([]string{"a", "b"}); got != "a, b" {
+		t.Fatalf("joinOrNone([a b]) = %q, want %q", got, "a, b")
+	}
+}
