@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-04 (1)
+- feat(cmd/idunapro): two new real subcommands, `login` and `kanban list` (cruise-queue card
+  9988, "the fuller multi-subcommand CLI itself" -- the gap every prior status update on this
+  card named explicitly). Both stay Go-native (no new PARENA decision function): `login` is a
+  pure network call with no ambiguous response to interpret, and `kanban list` is pure
+  fetch-and-print, unlike `health`'s own real need to interpret an HTTP-status-plus-body-flag
+  pair. `login <base-url> <email> <password>` prints the real JWT to stdout (stateless v0, no
+  credential cache file -- `token=$(idunapro login ...)` is the intended usage). `kanban list
+  <base-url> <token> [queue]` fetches `/api/v1/kanban/cards` and prints a real aligned table.
+  7 new tests (httptest-mocked success/failure/unreachable-host paths for both). `go build/vet/
+  test ./...` clean.
+  Real, found-live bug fixed in the same pass: the bearer-token kanban API requires
+  `kanban.access`, but `localUserPermissions` never granted it to ANY local user --
+  webmaster (uid=0) included -- only a Google-OAuth user with a DB role row could ever reach it.
+  Added to uid=0's own permission list (matching `devportal.access`'s own established
+  "hand-grant to the two real local accounts" precedent); whether non-webmaster local users
+  should also get it is a real, separate, founder-level product question, not decided here.
+  2 new tests confirm webmaster's own JWT now carries it and a regular user's own JWT still
+  doesn't. Live-verified end to end against a real running instance: real self-serve
+  registration, real login, real kanban card creation, and the actual compiled `idunapro`
+  binary correctly listing and queue-filtering the resulting real board.
+
 ## 2026-09-03 (5)
 - feat: cmd/idunapro's health check simplified -- HealthMessage/HealthExitCode (compiled from
   PARENA/stdlib/idunapro/cli_mod.prn's new HealthStatus enum design, BURROW commit dd406c5)

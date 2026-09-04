@@ -136,6 +136,17 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 			"drive.write",
 			"subscriptions.admin",
 			"devportal.access",
+			// kanban.access -- real, found-live gap (2026-09-04, while building `idunapro
+			// kanban list`, cruise-queue card 9988): the bearer-token kanban API
+			// (main.go's own `RequirePermission("kanban.access")`) had no real grant path
+			// for ANY local user at all, webmaster included -- only a Google-OAuth user
+			// with a DB role row could ever reach it. Added here for uid=0, matching this
+			// function's own established "the two local accounts that actually exist" grant
+			// pattern (devportal.access got the same treatment 2026-08-28). Whether
+			// non-webmaster local users should also get it is a real, separate,
+			// founder-level product question (kanban's own real "human/agent interop"
+			// framing suggests yes eventually) -- not decided here.
+			"kanban.access",
 		}
 	}
 	return []string{"iduna.me.read", "users.read.self", "devportal.access"}

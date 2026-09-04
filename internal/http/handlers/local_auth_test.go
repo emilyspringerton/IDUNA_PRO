@@ -95,3 +95,90 @@ func TestLocalAuthHandler_EmitsEvents(t *testing.T) {
 		t.Errorf("failure event must never contain the raw password, got: %s", recs[1].Event.Data)
 	}
 }
+
+// containsPerm checks a decoded JWT's own "permissions" claim (a []any of strings once decoded
+// through encoding/json) for a real, exact match.
+func containsPerm(t *testing.T, claims map[string]any, want string) bool {
+	t.Helper()
+	raw, ok := claims["permissions"]
+	if !ok {
+		t.Fatalf("token has no permissions claim: %+v", claims)
+	}
+	perms, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("permissions claim has unexpected type %T: %+v", raw, raw)
+	}
+	for _, p := range perms {
+		if s, ok := p.(string); ok && s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestLocalAuthHandler_Webmaster_GetsKanbanAccess -- real, live-tested finding (2026-09-04,
+// while building the `idunapro kanban list` CLI subcommand, cruise-queue card 9988): the
+// bearer-token kanban API requires "kanban.access", but no local user -- webmaster (uid=0)
+// included -- ever got it before this fix. Confirms uid=0's own real JWT now carries it.
+func TestLocalAuthHandler_Webmaster_GetsKanbanAccess(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	proj := &stubUserProjector{byEmail: map[string]*userlog.LocalUser{
+		"webmaster@example.com": {LocalUID: 0, Email: "webmaster@example.com", Status: "active",
+			PasswordHash: mustHash(t, "correct-horse-battery-staple")},
+	}}
+	h := &handlers.LocalAuthHandler{Keys: keys, Proj: proj}
+
+	body, _ := json.Marshal(map[string]string{"email": "webmaster@example.com", "password": "correct-horse-battery-staple"})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/auth/local", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login: status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct{ Token string `json:"token"` }
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	claims, err := jwt.Verify(keys, resp.Token)
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if !containsPerm(t, claims, "kanban.access") {
+		t.Errorf("expected webmaster's own real JWT to carry kanban.access, got permissions: %+v", claims["permissions"])
+	}
+}
+
+// TestLocalAuthHandler_RegularUser_DoesNotGetKanbanAccess -- real regression guard: this fix is
+// scoped to uid=0 only, a real, deliberate, named-in-comment boundary -- a regular local user
+// must not silently gain kanban.access as a side effect of this change.
+func TestLocalAuthHandler_RegularUser_DoesNotGetKanbanAccess(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	proj := &stubUserProjector{byEmail: map[string]*userlog.LocalUser{
+		"regular@example.com": {LocalUID: 1, Email: "regular@example.com", Status: "active",
+			PasswordHash: mustHash(t, "correct-horse-battery-staple")},
+	}}
+	h := &handlers.LocalAuthHandler{Keys: keys, Proj: proj}
+
+	body, _ := json.Marshal(map[string]string{"email": "regular@example.com", "password": "correct-horse-battery-staple"})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/auth/local", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("login: status = %d, want 200, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct{ Token string `json:"token"` }
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	claims, err := jwt.Verify(keys, resp.Token)
+	if err != nil {
+		t.Fatalf("verify token: %v", err)
+	}
+	if containsPerm(t, claims, "kanban.access") {
+		t.Errorf("expected a regular (non-webmaster) local user to NOT get kanban.access, got permissions: %+v", claims["permissions"])
+	}
+}
