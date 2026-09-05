@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-05 (5)
+- Restored IDUNA_PRO (CarePyre Console backend) after home-config loss: rebuilt binary, recreated env, reinstalled systemd unit, fixed BASE_URL to real domain carepyre.org (sess-20260905-0720-ec33e7c5)
 - feat(twilio): CP-SIP-242414/TWILLIO-API-124 — real Twilio operations proxy. New
   `internal/twilio` client (Basic Auth via a Twilio API Key SID/Secret) for
   GetBalance/ListTrunks/CreateTrunk/ListPhoneNumbers, and a new `TwilioHandler` exposing
