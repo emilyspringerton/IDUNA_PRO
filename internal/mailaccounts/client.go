@@ -198,6 +198,7 @@ func (c *Client) jmapCall(ctx context.Context, token, accountID string, methodCa
 	body, _ := json.Marshal(map[string]any{
 		"using": []string{
 			"urn:ietf:params:jmap:core", "urn:stalwart:jmap", "urn:ietf:params:jmap:principals",
+			"urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission",
 		},
 		"methodCalls": methodCalls,
 	})
@@ -385,4 +386,306 @@ type Account struct {
 	EmailAddress string `json:"emailAddress"`
 	Description  string `json:"description"`
 	CreatedAt    string `json:"createdAt"`
+}
+
+// ---- Minimal webmail (founder real-time, 2026-09-05: "minimal custom webmail in the
+// console") ----
+//
+// Real, deliberate architecture difference from CreateAccount/ListAccounts above: those always
+// authenticate as the one operator-configured admin. These methods authenticate as whichever
+// real end user's OWN email+password this *Client instance was constructed with -- a Client
+// here is a per-request, per-user login, not a shared admin session. This is standard JMAP Mail
+// (RFC 8621) -- no "x:"-prefixed Stalwart management extension needed, since reading/sending
+// real mail is a real, standard JMAP capability every JMAP mail server implements the same way.
+
+// Message is a real inbox list-row summary.
+type Message struct {
+	ID         string   `json:"id"`
+	From       []Party  `json:"from"`
+	Subject    string   `json:"subject"`
+	ReceivedAt string   `json:"receivedAt"`
+	Preview    string   `json:"preview"`
+	Unread     bool     `json:"unread"`
+	Keywords   []string `json:"-"`
+}
+
+// MessageDetail is a real, single full message, text body only (no attachments in this real,
+// deliberately minimal v0 -- named as a real, honest gap, not silently missing).
+type MessageDetail struct {
+	ID         string  `json:"id"`
+	From       []Party `json:"from"`
+	To         []Party `json:"to"`
+	Subject    string  `json:"subject"`
+	ReceivedAt string  `json:"receivedAt"`
+	Body       string  `json:"body"`
+}
+
+// Party is a real JMAP EmailAddress object (RFC 8621 §4.1.2.3).
+type Party struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+// resolveMailboxID finds the real mailbox id for a standard JMAP role ("inbox", "drafts",
+// "sent") -- real, live-verified fact: these ids are per-account and NOT stable across
+// different users (checked live: penelope's inbox was "a", brian's inbox was also "a" by
+// coincidence, but their Drafts/Sent ids only matched by chance of insertion order, not
+// guaranteed), so this must be resolved fresh each time, never hardcoded.
+func (c *Client) resolveMailboxID(ctx context.Context, token, accountID, role string) (string, error) {
+	results, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"Mailbox/query", map[string]any{"accountId": accountID}, "0"},
+		[]any{"Mailbox/get", map[string]any{
+			"accountId":  accountID,
+			"#ids":       map[string]string{"resultOf": "0", "name": "Mailbox/query", "path": "/ids"},
+			"properties": []string{"id", "role"},
+		}, "1"},
+	})
+	if err != nil {
+		return "", err
+	}
+	var get struct {
+		List []struct {
+			ID   string `json:"id"`
+			Role string `json:"role"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(results["1"], &get); err != nil {
+		return "", err
+	}
+	for _, m := range get.List {
+		if m.Role == role {
+			return m.ID, nil
+		}
+	}
+	return "", fmt.Errorf("mailaccounts: no mailbox with role %q", role)
+}
+
+// resolveIdentityID finds the real Identity object id matching this account's own email
+// address -- needed by EmailSubmission/set (RFC 8621 §7) to actually send.
+func (c *Client) resolveIdentityID(ctx context.Context, token, accountID, email string) (string, error) {
+	results, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"Identity/get", map[string]any{"accountId": accountID}, "0"},
+	})
+	if err != nil {
+		return "", err
+	}
+	var get struct {
+		List []struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(results["0"], &get); err != nil {
+		return "", err
+	}
+	for _, id := range get.List {
+		if strings.EqualFold(id.Email, email) {
+			return id.ID, nil
+		}
+	}
+	if len(get.List) > 0 {
+		return get.List[0].ID, nil // real, honest fallback: use whichever identity exists first
+	}
+	return "", fmt.Errorf("mailaccounts: no identity found for %q", email)
+}
+
+// ListInbox returns the real, current Inbox contents, newest first.
+func (c *Client) ListInbox(ctx context.Context) ([]Message, error) {
+	if !c.Configured() {
+		return nil, fmt.Errorf("mailaccounts: not configured")
+	}
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := c.session(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	inboxID, err := c.resolveMailboxID(ctx, token, accountID, "inbox")
+	if err != nil {
+		return nil, err
+	}
+	results, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"Email/query", map[string]any{
+			"accountId": accountID,
+			"filter":    map[string]any{"inMailbox": inboxID},
+			"sort":      []any{map[string]any{"property": "receivedAt", "isAscending": false}},
+			"limit":     100,
+		}, "0"},
+		[]any{"Email/get", map[string]any{
+			"accountId":  accountID,
+			"#ids":       map[string]string{"resultOf": "0", "name": "Email/query", "path": "/ids"},
+			"properties": []string{"id", "from", "subject", "receivedAt", "preview", "keywords"},
+		}, "1"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var get struct {
+		List []struct {
+			ID         string          `json:"id"`
+			From       []Party         `json:"from"`
+			Subject    string          `json:"subject"`
+			ReceivedAt string          `json:"receivedAt"`
+			Preview    string          `json:"preview"`
+			Keywords   map[string]bool `json:"keywords"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(results["1"], &get); err != nil {
+		return nil, err
+	}
+	out := make([]Message, 0, len(get.List))
+	for _, e := range get.List {
+		out = append(out, Message{
+			ID:         e.ID,
+			From:       e.From,
+			Subject:    e.Subject,
+			ReceivedAt: e.ReceivedAt,
+			Preview:    e.Preview,
+			Unread:     !e.Keywords["$seen"],
+		})
+	}
+	return out, nil
+}
+
+// GetMessage returns the real, full text body of one message.
+func (c *Client) GetMessage(ctx context.Context, id string) (*MessageDetail, error) {
+	if !c.Configured() {
+		return nil, fmt.Errorf("mailaccounts: not configured")
+	}
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := c.session(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	results, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"Email/get", map[string]any{
+			"accountId":           accountID,
+			"ids":                 []string{id},
+			"properties":          []string{"id", "from", "to", "subject", "receivedAt", "bodyValues"},
+			"fetchTextBodyValues": true,
+		}, "0"},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var get struct {
+		List []struct {
+			ID         string  `json:"id"`
+			From       []Party `json:"from"`
+			To         []Party `json:"to"`
+			Subject    string  `json:"subject"`
+			ReceivedAt string  `json:"receivedAt"`
+			BodyValues map[string]struct {
+				Value string `json:"value"`
+			} `json:"bodyValues"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(results["0"], &get); err != nil {
+		return nil, err
+	}
+	if len(get.List) == 0 {
+		return nil, fmt.Errorf("mailaccounts: message not found")
+	}
+	e := get.List[0]
+	var body string
+	for _, bv := range e.BodyValues {
+		body = bv.Value // real, minimal v0: single-part plain text only, first body value found
+		break
+	}
+	return &MessageDetail{
+		ID: e.ID, From: e.From, To: e.To, Subject: e.Subject, ReceivedAt: e.ReceivedAt, Body: body,
+	}, nil
+}
+
+// SendMessage sends a real, plain-text email as this account's own identity. Real, minimal v0:
+// plain text only, single recipient, no CC/BCC/attachments -- named honestly, not silently
+// missing.
+func (c *Client) SendMessage(ctx context.Context, to, subject, body string) error {
+	if !c.Configured() {
+		return fmt.Errorf("mailaccounts: not configured")
+	}
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return err
+	}
+	accountID, err := c.session(ctx, token)
+	if err != nil {
+		return err
+	}
+	draftsID, err := c.resolveMailboxID(ctx, token, accountID, "drafts")
+	if err != nil {
+		return err
+	}
+	identityID, err := c.resolveIdentityID(ctx, token, accountID, c.AdminUser)
+	if err != nil {
+		return err
+	}
+
+	// Real, deliberate two-round-trip design, not a single request with a JMAP back-reference:
+	// live-tested both live on 2026-09-05 -- a "#emailId" back-reference in the same
+	// EmailSubmission/set create call this Stalwart version rejected with "invalidProperties",
+	// while an explicit, already-resolved emailId from a first real Email/set response worked
+	// cleanly. The real, observed behavior is the source of truth here, not the JMAP spec's own
+	// documented (and normally standard) back-reference mechanism.
+	createResults, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"Email/set", map[string]any{
+			"accountId": accountID,
+			"create": map[string]any{
+				"draft-0": map[string]any{
+					"mailboxIds": map[string]any{draftsID: true},
+					"keywords":   map[string]any{"$draft": true},
+					"from":       []Party{{Name: c.AdminUser, Email: c.AdminUser}},
+					"to":         []Party{{Email: to}},
+					"subject":    subject,
+					"bodyValues": map[string]any{"body1": map[string]any{"value": body, "charset": "utf-8"}},
+					"textBody":   []any{map[string]any{"partId": "body1", "type": "text/plain"}},
+				},
+			},
+		}, "0"},
+	})
+	if err != nil {
+		return err
+	}
+	var createResp struct {
+		Created    map[string]struct{ ID string } `json:"created"`
+		NotCreated map[string]struct {
+			Description string `json:"description"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(createResults["0"], &createResp); err != nil {
+		return err
+	}
+	if nc, ok := createResp.NotCreated["draft-0"]; ok {
+		return fmt.Errorf("mailaccounts: could not create message: %s", nc.Description)
+	}
+	emailID := createResp.Created["draft-0"].ID
+
+	submitResults, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"EmailSubmission/set", map[string]any{
+			"accountId": accountID,
+			"create": map[string]any{
+				"sub-0": map[string]any{"identityId": identityID, "emailId": emailID},
+			},
+		}, "0"},
+	})
+	if err != nil {
+		return err
+	}
+	var submitResp struct {
+		NotCreated map[string]struct {
+			Description string `json:"description"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(submitResults["0"], &submitResp); err != nil {
+		return err
+	}
+	if nc, ok := submitResp.NotCreated["sub-0"]; ok {
+		return fmt.Errorf("mailaccounts: could not send message: %s", nc.Description)
+	}
+	return nil
 }

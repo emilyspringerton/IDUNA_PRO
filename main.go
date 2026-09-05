@@ -212,12 +212,17 @@ func main() {
 	// to provision accounts from the carepyre admin console is that possible?" Same nil-safe
 	// Configured() fallback shape as twilioH above -- an unset MAIL_STALWART_ADMIN_PASSWORD means
 	// the feature is unavailable, not a panic.
+	mailStalwartBaseURL := getenv("MAIL_STALWART_BASE_URL", "https://mail.carepyre.org")
 	mailAccountsH := &handlers.MailAccountsHandler{Client: &mailaccounts.Client{
-		BaseURL:       getenv("MAIL_STALWART_BASE_URL", "https://mail.carepyre.org"),
+		BaseURL:       mailStalwartBaseURL,
 		AdminUser:     getenv("MAIL_STALWART_ADMIN_USER", "admin"),
 		AdminPass:     os.Getenv("MAIL_STALWART_ADMIN_PASSWORD"),
 		DefaultDomain: getenv("MAIL_DEFAULT_DOMAIN", "carepyre.org"),
 	}}
+
+	// Real, minimal webmail -- founder real-time, 2026-09-05: "minimal custom webmail in the
+	// console". Any authenticated user, not admin-gated (see webmail.go's own header comment).
+	webmailH := &handlers.WebmailHandler{BaseURL: mailStalwartBaseURL}
 
 	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
 	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
@@ -308,6 +313,10 @@ func main() {
 	// (list) and POST (create) share the same permission check either way.
 	mailAccountsProtected := middleware.RequireAuth(keys)(mailAccountsH)
 	mux.Handle("/api/v1/mail-accounts", mailAccountsProtected)
+
+	// Real, minimal webmail -- any authenticated user, no users.admin gate.
+	webmailProtected := middleware.RequireAuth(keys)(webmailH)
+	mux.Handle("/api/v1/mail/", webmailProtected)
 
 	agentsProtected := middleware.RequireAuth(keys)(agentsH)
 	mux.Handle("/api/v1/agents", agentsProtected)
