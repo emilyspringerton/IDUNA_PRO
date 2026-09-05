@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-05 (5)
+- Admin-provisioned mailboxes now link to a local_uid and auto-connect that user's webmail (encrypted password at rest, admin-revealable via new reveal-password endpoint). (sess-20260905-0720-ec33e7c5)
 - Minimal webmail: GET/POST /api/v1/mail/* backed by real JMAP Email/Mailbox/Identity/EmailSubmission calls (sess-20260905-0720-ec33e7c5)
 - SIP provisioning capability-URL endpoint: mint (authenticated) + fetch (public, token-authed) for the native app's one-URL registration (sess-20260905-0720-ec33e7c5)
 - Real Stalwart mailbox provisioning: GET/POST /api/v1/mail-accounts, users.admin-gated, JMAP client in internal/mailaccounts/ (sess-20260905-0720-ec33e7c5)
