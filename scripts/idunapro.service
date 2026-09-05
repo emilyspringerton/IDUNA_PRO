@@ -1,0 +1,53 @@
+# IDUNA_PRO systemd user unit — process supervision for the first real, live IDUNA_PRO
+# deployment (kanban CPP-124433/CPP-2144333, "CarePyre Console"). Mirrors IDUNA's own
+# scripts/iduna.service almost exactly (same process-supervision shape, same health-check-
+# gated startup) — this is deployment infrastructure, not application logic, so reusing that
+# established pattern verbatim is the right move, not a shortcut. This unit does not change
+# anything about IDUNA_PRO's own source or behavior; it just runs the existing binary as a
+# real, supervised service instead of a one-off `go run`.
+#
+# Deploy:
+#   mkdir -p ~/.config/systemd/user
+#   cp idunapro.service ~/.config/systemd/user/idunapro.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now idunapro.service
+#   systemctl --user status idunapro.service
+#
+# Build the binary first:
+#   cd /home/fatbaby/IDUNA_PRO
+#   GOWORK=off go build -o ~/.local/bin/idunapro .
+#
+# Required env vars (set in ~/.config/idunapro/env):
+#   JWT_SECRET   — random string, min 32 chars (a DIFFERENT secret from IDUNA's own —
+#                  IDUNA_PRO is a real, separate trust domain, its JWTs must never validate
+#                  against IDUNA's own keys or vice versa)
+#   JWT_ISSUER   — e.g. "https://carepyre-console.internal" (distinct from IDUNA's own issuer)
+#   ADDR         — defaults to :8081 (this box's real IDUNA already owns :8080)
+#
+# No MYSQL_DSN needed — embedded SQLite backend runs in-process, same as IDUNA.
+
+[Unit]
+Description=IDUNA_PRO — CarePyre Console backend (first real IDUNA_PRO deployment)
+After=network.target
+Documentation=file:///home/fatbaby/IDUNA_PRO/docs
+
+[Service]
+Type=simple
+WorkingDirectory=/home/fatbaby/IDUNA_PRO
+EnvironmentFile=-%h/.config/idunapro/env
+ExecStart=%h/.local/bin/idunapro
+# Same real "gate on the HTTP listener actually answering" discipline IDUNA's own unit uses --
+# Type=simple only guarantees the process forked, not that it's actually serving yet.
+ExecStartPost=/bin/sh -c 'for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:8081/health && exit 0; sleep 1; done; echo "idunapro health check failed after 30s" >&2; exit 1'
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits -- same real ceiling IDUNA's own unit uses; IDUNA_PRO's real, current
+# footprint (embedded SQLite, no heavier dependents yet) fits comfortably under it.
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=default.target
