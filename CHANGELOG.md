@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-09-05 (5)
+- feat(twilio): CP-SIP-242414/TWILLIO-API-124 — real Twilio operations proxy. New
+  `internal/twilio` client (Basic Auth via a Twilio API Key SID/Secret) for
+  GetBalance/ListTrunks/CreateTrunk/ListPhoneNumbers, and a new `TwilioHandler` exposing
+  `GET /api/v1/twilio/status` and `POST /api/v1/twilio/trunk`, gated on a new, separate
+  `twilio.admin` permission (real IAM role separation, not folded into `users.admin`). Real
+  credentials stay server-side, never sent to the browser. Real Twilio errors decode and pass
+  through verbatim (load-bearing: this account currently fails trunk creation with a real Trust
+  Hub compliance block, code 20003 — the console needs to show that exact message). Live-verified
+  against the real Twilio account. `go test ./...` passes with new regression coverage. Apple
+  #17940.
+
 ## 2026-09-05 (4)
 - feat(users): CP-SIP-1244543543 — real, generic self-service password change
   (`POST /api/v1/auth/change-password`), fixing a found-live gap: `PATCH /api/v1/users/{uid}`
