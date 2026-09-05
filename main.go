@@ -56,6 +56,7 @@ import (
 	authjwt "idunapro/internal/auth/jwt"
 	"idunapro/internal/http/handlers"
 	"idunapro/internal/http/middleware"
+	"idunapro/internal/mailaccounts"
 	"idunapro/internal/mailinglist"
 	"idunapro/internal/store"
 	"idunapro/internal/twilio"
@@ -175,6 +176,17 @@ func main() {
 		os.Getenv("TWILIO_ACCOUNT_SID"), os.Getenv("TWILIO_API_KEY_SID"), os.Getenv("TWILIO_API_KEY_SECRET"),
 	)}
 
+	// CarePyre Stalwart mailbox provisioning -- founder real-time, 2026-09-05: "ok we need a way
+	// to provision accounts from the carepyre admin console is that possible?" Same nil-safe
+	// Configured() fallback shape as twilioH above -- an unset MAIL_STALWART_ADMIN_PASSWORD means
+	// the feature is unavailable, not a panic.
+	mailAccountsH := &handlers.MailAccountsHandler{Client: &mailaccounts.Client{
+		BaseURL:       getenv("MAIL_STALWART_BASE_URL", "https://mail.carepyre.org"),
+		AdminUser:     getenv("MAIL_STALWART_ADMIN_USER", "admin"),
+		AdminPass:     os.Getenv("MAIL_STALWART_ADMIN_PASSWORD"),
+		DefaultDomain: getenv("MAIL_DEFAULT_DOMAIN", "carepyre.org"),
+	}}
+
 	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
 	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
 	backlogPath := os.Getenv("BACKLOG_PATH")
@@ -253,6 +265,12 @@ func main() {
 	twilioProtected := middleware.RequireAuth(keys)(twilioH)
 	mux.Handle("/api/v1/twilio/status", twilioProtected)
 	mux.Handle("/api/v1/twilio/trunk", twilioProtected)
+
+	// CarePyre Stalwart mailbox provisioning -- users.admin-gated inside the handler itself
+	// (matches sip-accounts' own admin routes), not via middleware.RequirePermission, since GET
+	// (list) and POST (create) share the same permission check either way.
+	mailAccountsProtected := middleware.RequireAuth(keys)(mailAccountsH)
+	mux.Handle("/api/v1/mail-accounts", mailAccountsProtected)
 
 	agentsProtected := middleware.RequireAuth(keys)(agentsH)
 	mux.Handle("/api/v1/agents", agentsProtected)
