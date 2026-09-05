@@ -147,6 +147,13 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 			// founder-level product question (kanban's own real "human/agent interop"
 			// framing suggests yes eventually) -- not decided here.
 			"kanban.access",
+			// twilio.admin -- CP-SIP-242414/TWILLIO-API-124 ("we can do all of the operations
+			// from the carepyre console side... user roles iam etc"). A real, separate
+			// permission from users.admin (not folded into it) since Twilio operations are a
+			// genuinely distinct capability an admin might not want every users.admin holder to
+			// have -- same "the two local accounts that actually exist" grant pattern this
+			// function already establishes for devportal.access/kanban.access.
+			"twilio.admin",
 		}
 	}
 	return []string{"iduna.me.read", "users.read.self", "devportal.access"}

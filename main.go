@@ -58,6 +58,7 @@ import (
 	"idunapro/internal/http/middleware"
 	"idunapro/internal/mailinglist"
 	"idunapro/internal/store"
+	"idunapro/internal/twilio"
 	"idunapro/internal/userlog"
 	"idunapro/internal/util"
 )
@@ -166,6 +167,13 @@ func main() {
 	adminLoginH := &handlers.AdminLoginHandler{Store: iamStore, Keys: keys, Issuer: issuer, EventLog: unifiedLog}
 	changePasswordH := &handlers.ChangePasswordHandler{Log: uel, Proj: userProj}
 	sipAccountsH := &handlers.SipAccountsHandler{DB: db}
+	// CP-SIP-242414/TWILLIO-API-124 -- real credentials, server-side only, never sent to the
+	// browser. Empty env vars mean twilio.Client.Configured() is false and TwilioHandler
+	// responds "not configured" rather than panicking -- same nil-safe fallback shape
+	// EventLog/Store already use elsewhere in this file.
+	twilioH := &handlers.TwilioHandler{Client: twilio.NewClient(
+		os.Getenv("TWILIO_ACCOUNT_SID"), os.Getenv("TWILIO_API_KEY_SID"), os.Getenv("TWILIO_API_KEY_SECRET"),
+	)}
 
 	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
 	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
@@ -241,6 +249,10 @@ func main() {
 	sipAccountsProtected := middleware.RequireAuth(keys)(sipAccountsH)
 	mux.Handle("/api/v1/sip-accounts", sipAccountsProtected)
 	mux.Handle("/api/v1/sip-accounts/", sipAccountsProtected)
+
+	twilioProtected := middleware.RequireAuth(keys)(twilioH)
+	mux.Handle("/api/v1/twilio/status", twilioProtected)
+	mux.Handle("/api/v1/twilio/trunk", twilioProtected)
 
 	agentsProtected := middleware.RequireAuth(keys)(agentsH)
 	mux.Handle("/api/v1/agents", agentsProtected)
