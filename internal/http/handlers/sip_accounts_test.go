@@ -1,0 +1,201 @@
+package handlers_test
+
+import (
+	"bytes"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
+
+	"idunapro/internal/auth/jwt"
+	"idunapro/internal/http/handlers"
+	"idunapro/internal/http/middleware"
+)
+
+func newTestSipAccountsDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`CREATE TABLE sip_accounts (
+		id          INTEGER  PRIMARY KEY AUTOINCREMENT,
+		local_uid   INTEGER  NOT NULL UNIQUE,
+		extension   VARCHAR(32) NOT NULL,
+		sip_server  VARCHAR(255) NOT NULL,
+		sip_port    INTEGER  NOT NULL DEFAULT 5060,
+		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`)
+	if err != nil {
+		t.Fatalf("create sip_accounts table: %v", err)
+	}
+	return db
+}
+
+func sipAccountsHandlerWithAuth(keys *jwt.Keys, db *sql.DB) http.Handler {
+	h := &handlers.SipAccountsHandler{DB: db}
+	return middleware.RequireAuth(keys)(h)
+}
+
+func sipAccountsSignToken(t *testing.T, keys *jwt.Keys, localUID int, perms ...string) string {
+	t.Helper()
+	claims := map[string]any{
+		"sub":       "local:1",
+		"local_uid": localUID,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if len(perms) > 0 {
+		claims["permissions"] = perms
+	}
+	tok, err := jwt.Sign(keys, claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return tok
+}
+
+// TestSipAccounts_SelfReadNeedsNoAdminPermission -- CP-SIP-1244543543's own "see their sip
+// information" ask: any authenticated user can read their OWN assigned SIP account, no
+// users.admin needed.
+func TestSipAccounts_SelfReadNeedsNoAdminPermission(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port) VALUES (5, '1000', '198.58.107.85', 5060)`); err != nil {
+		t.Fatalf("seed sip_accounts: %v", err)
+	}
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 5))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("self-read: status = %d, body = %s, want 200", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["extension"] != "1000" {
+		t.Errorf("extension = %v, want 1000", got["extension"])
+	}
+}
+
+// TestSipAccounts_SelfReadNoAccountYet -- a real, honest 404 (not a crash or an empty 200) for
+// a user with no SIP account assigned yet.
+func TestSipAccounts_SelfReadNoAccountYet(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 42))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("no account yet: status = %d, want 404", w.Code)
+	}
+}
+
+// TestSipAccounts_CannotReadSomeoneElses -- self-read means SELF, not any authenticated caller
+// reading any other user's SIP info.
+func TestSipAccounts_CannotReadSomeoneElses(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port) VALUES (5, '1000', '198.58.107.85', 5060)`); err != nil {
+		t.Fatalf("seed sip_accounts: %v", err)
+	}
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	// Caller is local_uid 6, asking for /me -- gets THEIR OWN (nonexistent) record, never uid 5's.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 6))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("different caller: status = %d, want 404 (their own, unassigned record)", w.Code)
+	}
+}
+
+// TestSipAccounts_ListRequiresAdmin -- the admin list route rejects a caller with no
+// users.admin permission.
+func TestSipAccounts_ListRequiresAdmin(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 6))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("list without users.admin: status = %d, want 403", w.Code)
+	}
+}
+
+// TestSipAccounts_AdminUpsertAndList -- a real, full admin flow: assign a SIP account to a
+// user, then see it in the list, then update it (upsert, not insert-only).
+func TestSipAccounts_AdminUpsertAndList(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+	adminToken := sipAccountsSignToken(t, keys, 0, "users.admin")
+
+	body, _ := json.Marshal(map[string]any{"extension": "1000", "sip_server": "198.58.107.85", "sip_port": 5060})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/7", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin upsert: status = %d, body = %s, want 200", w.Code, w.Body.String())
+	}
+
+	// Real upsert -- re-assigning the same user to a different extension updates in place,
+	// it doesn't error or create a second row (local_uid is UNIQUE).
+	body2, _ := json.Marshal(map[string]any{"extension": "1001", "sip_server": "198.58.107.85", "sip_port": 5060})
+	req2 := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/7", bytes.NewReader(body2))
+	req2.Header.Set("Authorization", "Bearer "+adminToken)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("admin re-upsert: status = %d, body = %s, want 200", w2.Code, w2.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts", nil)
+	listReq.Header.Set("Authorization", "Bearer "+adminToken)
+	listW := httptest.NewRecorder()
+	h.ServeHTTP(listW, listReq)
+	if listW.Code != http.StatusOK {
+		t.Fatalf("admin list: status = %d, want 200", listW.Code)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(listW.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 row (upsert, not insert-only), got %d: %+v", len(got), got)
+	}
+	if got[0]["extension"] != "1001" {
+		t.Errorf("extension = %v, want 1001 (the re-upserted value)", got[0]["extension"])
+	}
+}

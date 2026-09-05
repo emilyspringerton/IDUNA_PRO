@@ -164,6 +164,8 @@ func main() {
 	registerH := &handlers.RegisterHandler{Keys: keys, Log: uel, Proj: userProj, Store: iamStore, Issuer: issuer}
 	logsH := &handlers.LogsHandler{Store: unifiedLog, HECToken: getenv("IDUNA_HEC_TOKEN", "")}
 	adminLoginH := &handlers.AdminLoginHandler{Store: iamStore, Keys: keys, Issuer: issuer, EventLog: unifiedLog}
+	changePasswordH := &handlers.ChangePasswordHandler{Log: uel, Proj: userProj}
+	sipAccountsH := &handlers.SipAccountsHandler{DB: db}
 
 	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
 	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
@@ -233,6 +235,13 @@ func main() {
 	mux.Handle("/api/v1/users", usersProtected)
 	mux.Handle("/api/v1/users/", usersProtected)
 
+	// CP-SIP-1244543543 -- sip-accounts mixes a self-read route (/me) with users.admin-gated
+	// admin routes inside the one handler, same real shape usersH's own getUser/updateUser
+	// split already establishes.
+	sipAccountsProtected := middleware.RequireAuth(keys)(sipAccountsH)
+	mux.Handle("/api/v1/sip-accounts", sipAccountsProtected)
+	mux.Handle("/api/v1/sip-accounts/", sipAccountsProtected)
+
 	agentsProtected := middleware.RequireAuth(keys)(agentsH)
 	mux.Handle("/api/v1/agents", agentsProtected)
 	mux.Handle("/api/v1/agents/", agentsProtected)
@@ -241,6 +250,9 @@ func main() {
 	authRateLimit := middleware.AuthRateLimit(authLimiter)
 	mux.Handle("/api/v1/auth/local", authRateLimit(localAuthH))
 	mux.Handle("/api/v1/auth/register", authRateLimit(registerH))
+	// CP-SIP-1244543543 -- self-service (any authenticated caller, verified against their OWN
+	// current password inside the handler), so just RequireAuth, no RequirePermission gate.
+	mux.Handle("/api/v1/auth/change-password", authRateLimit(middleware.RequireAuth(keys)(changePasswordH)))
 
 	deviceH.Register(mux)
 
