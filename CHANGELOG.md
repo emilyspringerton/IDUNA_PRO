@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-05 (3)
+- chore(ops): real systemd unit (`scripts/idunapro.service`) for the first live IDUNA_PRO
+  deployment — CarePyre's own console (`CarePyre/docs/CAREPYRE_CONSOLE_NORTHSTAR.md`). Mirrors
+  IDUNA's own `scripts/iduna.service` process-supervision shape. Deployment infrastructure
+  only — zero application code changes; this repo's own API (`/api/v1/auth/register`,
+  `/api/v1/auth/local`, `/api/v1/identities/me`) is consumed as-is by a real, separate,
+  CarePyre-branded front end running elsewhere, per real founder direction ("build it with
+  iduna pro not into iduna pro").
+
 ## 2026-09-05 (2)
 - feat(mailinglist): S245-04 "consoleify" real settings page shipped at `/admin/mailing-list`,
   mounted alongside the kanban board's own admin surface (S243-08), same "one handler, two entry
