@@ -27,6 +27,17 @@ via both a cookie-authenticated browser UI (`/admin/kanban`) and a bearer-token 
 card create/list/done via the bearer API, card create via the cookie session, real Apple filed
 on a "done" move.
 
+**Real, shipped (2026-09-05, S245-05)**: the mailing-list vault subsystem, extracted from IDUNA
+verbatim (`internal/mailinglist` had zero cross-imports to begin with) — real signup/count/
+unlock/init routes, S245-01's opt-in config/file-key unlock mode (`MAILING_LIST_KEY_FILE`, no
+operator needed after a redeploy), S245-02's export endpoint (`mailinglist.export` permission),
+and S245-03's per-instance admin-configurable Mailchimp settings (`mailinglist.admin`
+permission — stored settings win over the env-var fallback once the vault is unlocked).
+Generalized on the way out: no hardcoded AllowOrigin/per-product MailchimpLists (those were the
+real, checked EINHORN-specific parts) — a tenant sets `MAILING_LIST_ALLOW_ORIGIN` instead. Live-
+verified: fresh-SQLite boot, migrations applied (`mailinglist.export`/`mailinglist.admin` both
+present), `/health` OK. Unblocks S245-04's settings page in this repo's own admin surface.
+
 Not yet built: the extensibility hook contract (PARENA mods via `burrow build`), a docs site,
 an online editor, `console.okemily.com`, or the tenant-provisioning control plane (all real,
 separately scoped in the NORTHSTAR doc above).

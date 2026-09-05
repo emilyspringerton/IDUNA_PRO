@@ -7,10 +7,18 @@
 // IDUNA/docs/EMILY_FOR_BUSINESS_NORTHSTAR.md's own "IDUNA_PRO — a real extraction plan" section.
 //
 // Deliberately NOT here (see that NORTHSTAR doc for the full list and reasoning): the full Back
-// Office admin UI (`admin.go`, coupled to internal/mailinglist), the developer portal,
-// blog/tyler/promptoverse/mailinglist/drive/vault, every game-specific handler
-// (mmo/redgarden/shankpit/papercraft/racer), HEIMDAL, push tokens. Each is a real, later,
-// separate decision -- not silently dropped, just not extracted yet.
+// Office admin UI (`admin.go`), the developer portal, blog/tyler/promptoverse/drive/vault, every
+// game-specific handler (mmo/redgarden/shankpit/papercraft/racer), HEIMDAL, push tokens. Each is
+// a real, later, separate decision -- not silently dropped, just not extracted yet.
+//
+// mailinglist WAS on that "not here" list -- extracted 2026-09-05 (S245-05) once S245-01/02/03
+// existed as real APIs in IDUNA and this repo's own admin surface (S243-08's kanban board)
+// needed a settings page to sit alongside (S245-04). Generalized on the way out: no hardcoded
+// AllowOrigin/per-product MailchimpLists (the real, checked EINHORN-specific parts) -- a tenant
+// configures its own origin via MAILING_LIST_ALLOW_ORIGIN instead. Copied, not reinvented:
+// internal/mailinglist is package-identical to IDUNA's own (zero cross-imports to begin with,
+// so the port needed no internal changes at all), internal/http/handlers/mailinglist.go only
+// needed its two "iduna/..." import paths rewritten to "idunapro/...".
 //
 // The kanban board (S243-08, founder real-time: "build the kanban into IDUNA_PRO its a good
 // affordance for interop between human and agents... one of the core integration points") IS
@@ -33,10 +41,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -45,6 +56,7 @@ import (
 	authjwt "idunapro/internal/auth/jwt"
 	"idunapro/internal/http/handlers"
 	"idunapro/internal/http/middleware"
+	"idunapro/internal/mailinglist"
 	"idunapro/internal/store"
 	"idunapro/internal/userlog"
 	"idunapro/internal/util"
@@ -165,6 +177,44 @@ func main() {
 	}
 	kanbanInboxH := &handlers.KanbanInboxHandler{DB: db, BacklogPath: backlogPath}
 
+	// Mailing-list vault -- S245-05 extraction from IDUNA (this file's own header comment used
+	// to list mailinglist under "deliberately not here"; that's now out of date). Generalized:
+	// no hardcoded AllowOrigin/per-product MailchimpLists the way IDUNA's own okemily.com
+	// wiring has -- those were the real, checked EINHORN-specific parts S245-05 named, so a
+	// tenant configures its own origin via env instead. Starts locked, same passphrase-path
+	// default as IDUNA; a tenant can opt into S245-01's file-key mode via MAILING_LIST_KEY_FILE
+	// for unattended-restart signups.
+	mailingListDBPath := getenv("MAILING_LIST_DB_PATH", filepath.Join(root, "var", "mailinglist.db"))
+	mailingListStore, err := mailinglist.Open(mailingListDBPath)
+	if err != nil {
+		log.Fatalf("mailinglist: failed to open store: %v", err)
+	}
+	mailingListVault := mailinglist.NewVault()
+	var mailchimpClient *mailinglist.MailchimpClient
+	if mcKey := os.Getenv("MAILCHIMP_API_KEY"); mcKey != "" {
+		mailchimpClient = mailinglist.NewMailchimpClient(mcKey, os.Getenv("MAILCHIMP_LIST_ID"))
+		log.Printf("mailinglist: mailchimp sync configured (env)")
+	}
+	var mailingListAllowOrigin []string
+	if raw := os.Getenv("MAILING_LIST_ALLOW_ORIGIN"); raw != "" {
+		mailingListAllowOrigin = strings.Split(raw, ",")
+	}
+	mailingListH := &handlers.MailingListHandler{
+		Store:       mailingListStore,
+		Vault:       mailingListVault,
+		Mailchimp:   mailchimpClient,
+		AllowOrigin: mailingListAllowOrigin,
+		Limiter:     middleware.NewIPRateLimiter(5),
+	}
+	if keyFilePath := os.Getenv("MAILING_LIST_KEY_FILE"); keyFilePath != "" {
+		if err := mailingListAutoUnlock(mailingListStore, mailingListVault, keyFilePath); err != nil {
+			log.Fatalf("mailinglist: file-key auto-unlock failed: %v", err)
+		}
+		log.Printf("mailinglist: vault auto-unlocked from key file %s", keyFilePath)
+	} else {
+		log.Printf("mailinglist: vault locked — run cmd/mailing-list-unlock to accept signups")
+	}
+
 	mux := http.NewServeMux()
 
 	mux.Handle("/api/v1/auth/google", googleAuthH)
@@ -214,6 +264,22 @@ func main() {
 	mux.Handle("/api/v1/kanban/cards", kanbanAPIProtected)
 	mux.Handle("/api/v1/kanban/cards/", kanbanAPIProtected)
 
+	// Mailing-list routes — see this file's own wiring comment above.
+	mailingListH.Register(mux)
+	mux.Handle("/api/v1/mailing-list/export",
+		middleware.RequireAuth(keys)(middleware.RequirePermission("mailinglist.export")(http.HandlerFunc(mailingListH.Export))))
+	mailingListSettingsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("mailinglist.admin")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			mailingListH.GetMailchimpSettings(w, r)
+		case http.MethodPut:
+			mailingListH.PutMailchimpSettings(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/v1/mailing-list/settings/mailchimp", mailingListSettingsProtected)
+
 	// Replay unapplied user events on startup (same real, established pattern IDUNA itself uses).
 	if err := userlog.ReplayUnapplied(context.Background(), uel, userProj); err != nil {
 		log.Printf("user event replay: %v (continuing)", err)
@@ -229,4 +295,38 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// mailingListAutoUnlock implements S245-01's config/file-key vault mode: on first boot (vault
+// not yet initialized) it generates a fresh key, writes it to keyFilePath (0600), and
+// initializes the vault with it; on every subsequent boot it reads the existing key file back
+// and unlocks with it. Ported verbatim from IDUNA's own main.go as part of the S245-05
+// extraction.
+func mailingListAutoUnlock(store *mailinglist.Store, v *mailinglist.Vault, keyFilePath string) error {
+	initialized, err := store.Initialized()
+	if err != nil {
+		return fmt.Errorf("check vault init state: %w", err)
+	}
+	if !initialized {
+		key, err := mailinglist.NewFileKey()
+		if err != nil {
+			return err
+		}
+		canaryCT, canaryNonce, err := mailinglist.NewCanaryFromKey(key)
+		if err != nil {
+			return err
+		}
+		if err := store.InitVault([]byte{}, canaryCT, canaryNonce); err != nil {
+			return fmt.Errorf("init vault: %w", err)
+		}
+		if err := os.WriteFile(keyFilePath, []byte(hex.EncodeToString(key)+"\n"), 0o600); err != nil {
+			return fmt.Errorf("write key file: %w", err)
+		}
+	}
+
+	_, canaryCT, canaryNonce, err := store.VaultMeta()
+	if err != nil {
+		return fmt.Errorf("read vault meta: %w", err)
+	}
+	return v.UnlockFromKeyFile(keyFilePath, canaryCT, canaryNonce)
 }

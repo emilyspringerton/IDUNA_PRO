@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-05 (1)
+- feat(mailinglist): S245-05 extraction from IDUNA — the mailing-list vault subsystem is now real
+  here too. `internal/mailinglist` copied verbatim (zero cross-imports made this a real, clean
+  port, not a rewrite); `internal/http/handlers/mailinglist.go` needed only its two `iduna/...`
+  import paths rewritten. Brings S245-01 (opt-in config/file-key unlock, `MAILING_LIST_KEY_FILE`),
+  S245-02 (`GET /api/v1/mailing-list/export`, `mailinglist.export` permission), and S245-03
+  (admin-configurable Mailchimp settings, `mailinglist.admin` permission) along in one pass, since
+  all three were already real, tested code in the source repo. Generalized, not copied blindly:
+  no hardcoded `AllowOrigin`/per-product `MailchimpLists` (the real, checked EINHORN-specific
+  parts S245-05 itself named) — a tenant sets `MAILING_LIST_ALLOW_ORIGIN` instead. New
+  `202609050001/02_mailinglist_*_permission.sql` migrations (same permission IDs as IDUNA's own,
+  for tidiness, not a hard requirement). `go build`/`go test ./...` clean (`GOWORK=off`);
+  live-verified booting the real binary against a fresh SQLite file — both permissions present
+  after migration, `/health` OK. Unblocks S245-04's settings page in this repo's own admin
+  surface.
+
 ## 2026-09-04 (3)
 - feat(cmd/idunapro): new `idunapro whoami <base-url> <token>` subcommand (cruise-queue card
   9988) -- real, now-unblocked next step, closed the same session as the `/api/v1/identities/me`
