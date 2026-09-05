@@ -42,6 +42,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -167,7 +168,38 @@ func main() {
 	logsH := &handlers.LogsHandler{Store: unifiedLog, HECToken: getenv("IDUNA_HEC_TOKEN", "")}
 	adminLoginH := &handlers.AdminLoginHandler{Store: iamStore, Keys: keys, Issuer: issuer, EventLog: unifiedLog}
 	changePasswordH := &handlers.ChangePasswordHandler{Log: uel, Proj: userProj}
-	sipAccountsH := &handlers.SipAccountsHandler{DB: db}
+	// Real, per-extension PJSIP secrets for the sip-provisioning capability-URL flow (founder
+	// real-time, 2026-09-05: "make the sip phone register with just that URL") -- an operator-
+	// supplied env var, same real pattern MAIL_STALWART_ADMIN_PASSWORD/Twilio credentials
+	// already use in this codebase, not a hand-typed web form or a new DB column. Format:
+	// {"1000":"<the real EMILY/var/carepyre-phone-secret.env value>"}.
+	sipSecretsByExtension := map[string]string{}
+	if raw := os.Getenv("SIP_SECRETS_JSON"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &sipSecretsByExtension); err != nil {
+			log.Printf("sip-provisioning: SIP_SECRETS_JSON is not valid JSON, ignoring: %v", err)
+		}
+	}
+	// SIP_PROVISIONING_KEY signs the capability tokens -- a real, random secret, distinct from
+	// JWT_SECRET (this token's own trust boundary is different: it's a long-lived, unauthenticated
+	// bearer-of-the-URL credential, not a short-lived session JWT). Falls back to JWT_SECRET
+	// rather than refusing to start if unset, since an empty key would mean the provisioning
+	// route 503s cleanly anyway (SipAccountsHandler checks len(ProvisioningKey) == 0).
+	sipProvisioningKey := []byte(getenv("SIP_PROVISIONING_KEY", os.Getenv("JWT_SECRET")))
+	// Real bug found and fixed before shipping: PublicBaseURL must include nginx's own
+	// "/console-api" prefix (see CarePyre/ops/nginx-carepyre.conf's own `location /console-api/`
+	// block) -- bare baseURL ("https://carepyre.org") would mint a URL nginx routes to a
+	// completely different, unrelated service (the plain IDUNA on :8080), not this one.
+	sipAccountsH := &handlers.SipAccountsHandler{
+		DB:                    db,
+		ProvisioningKey:       sipProvisioningKey,
+		PublicBaseURL:         baseURL + "/console-api",
+		SipSecretsByExtension: sipSecretsByExtension,
+	}
+	sipProvisioningFetchH := &handlers.SipProvisioningFetchHandler{
+		DB:                    db,
+		ProvisioningKey:       sipProvisioningKey,
+		SipSecretsByExtension: sipSecretsByExtension,
+	}
 	// CP-SIP-242414/TWILLIO-API-124 -- real credentials, server-side only, never sent to the
 	// browser. Empty env vars mean twilio.Client.Configured() is false and TwilioHandler
 	// responds "not configured" rather than panicking -- same nil-safe fallback shape
@@ -261,6 +293,11 @@ func main() {
 	sipAccountsProtected := middleware.RequireAuth(keys)(sipAccountsH)
 	mux.Handle("/api/v1/sip-accounts", sipAccountsProtected)
 	mux.Handle("/api/v1/sip-accounts/", sipAccountsProtected)
+
+	// Deliberately NOT wrapped in middleware.RequireAuth -- see SipProvisioningFetchHandler's
+	// own header comment for why: the native app fetches this before it has ever logged in, so
+	// there is no bearer token to require. The capability token in the URL path is the auth.
+	mux.Handle("/api/v1/sip-provisioning/", sipProvisioningFetchH)
 
 	twilioProtected := middleware.RequireAuth(keys)(twilioH)
 	mux.Handle("/api/v1/twilio/status", twilioProtected)

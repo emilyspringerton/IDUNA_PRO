@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,5 +257,81 @@ func TestSipAccounts_AdminUpsertAndList(t *testing.T) {
 	}
 	if got[0]["extension"] != "1001" {
 		t.Errorf("extension = %v, want 1001 (the re-upserted value)", got[0]["extension"])
+	}
+}
+
+// TestSipProvisioning_MintAndFetchRoundTrip -- founder real-time, 2026-09-05: "make the sip
+// phone register with just that URL." Real, full round trip: mint a capability URL through the
+// authenticated /me/provisioning-url route, then fetch it through the SEPARATE, unauthenticated
+// SipProvisioningFetchHandler (simulating the native app, which has no bearer token) and confirm
+// it returns the real password.
+func TestSipProvisioning_MintAndFetchRoundTrip(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port) VALUES (7, '1000', '198.58.107.85', 5060)`); err != nil {
+		t.Fatalf("seed sip_accounts: %v", err)
+	}
+
+	provisioningKey := []byte("test-provisioning-key-not-a-real-secret")
+	sipAccountsH := &handlers.SipAccountsHandler{
+		DB:              db,
+		ProvisioningKey: provisioningKey,
+		PublicBaseURL:   "https://carepyre.org",
+	}
+	protected := middleware.RequireAuth(keys)(sipAccountsH)
+
+	mintReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me/provisioning-url", nil)
+	mintReq.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 7))
+	mintW := httptest.NewRecorder()
+	protected.ServeHTTP(mintW, mintReq)
+	if mintW.Code != http.StatusOK {
+		t.Fatalf("mint: status = %d, body = %s, want 200", mintW.Code, mintW.Body.String())
+	}
+	var mintResp struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal(mintW.Body.Bytes(), &mintResp); err != nil {
+		t.Fatalf("unmarshal mint response: %v", err)
+	}
+	if !strings.HasPrefix(mintResp.URL, "https://carepyre.org/api/v1/sip-provisioning/") {
+		t.Fatalf("minted URL = %q, want it to start with the public base URL + real path", mintResp.URL)
+	}
+	token := strings.TrimPrefix(mintResp.URL, "https://carepyre.org/api/v1/sip-provisioning/")
+
+	fetchH := &handlers.SipProvisioningFetchHandler{
+		DB:                    db,
+		ProvisioningKey:       provisioningKey,
+		SipSecretsByExtension: map[string]string{"1000": "real-test-password-123"},
+	}
+	fetchReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-provisioning/"+token, nil)
+	fetchW := httptest.NewRecorder()
+	fetchH.ServeHTTP(fetchW, fetchReq)
+	if fetchW.Code != http.StatusOK {
+		t.Fatalf("fetch: status = %d, body = %s, want 200 -- no bearer token was sent, confirming this route needs none", fetchW.Code, fetchW.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(fetchW.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal fetch response: %v", err)
+	}
+	if payload["password"] != "real-test-password-123" {
+		t.Errorf("password = %v, want the real configured secret", payload["password"])
+	}
+	if payload["extension"] != "1000" {
+		t.Errorf("extension = %v, want 1000", payload["extension"])
+	}
+	if payload["scheme"] != "carepyre-sip-v2" {
+		t.Errorf("scheme = %v, want carepyre-sip-v2 (distinct from the password-less v1 QR payload)", payload["scheme"])
+	}
+
+	// A tampered token (wrong signature) must be rejected -- this is the entire security
+	// boundary of this endpoint, worth a real, explicit negative test.
+	tamperedReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-provisioning/"+token+"deadbeef", nil)
+	tamperedW := httptest.NewRecorder()
+	fetchH.ServeHTTP(tamperedW, tamperedReq)
+	if tamperedW.Code == http.StatusOK {
+		t.Fatalf("tampered token was accepted -- real security bug")
 	}
 }

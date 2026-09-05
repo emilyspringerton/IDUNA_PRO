@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -19,13 +23,73 @@ import (
 //
 // Routes (all require Bearer JWT via middleware.RequireAuth):
 //
-//	GET             /api/v1/sip-accounts/me      self, any authenticated caller
-//	GET             /api/v1/sip-accounts/me/qr   self, any authenticated caller -- QR onboarding payload
-//	GET             /api/v1/sip-accounts         list, requires users.admin
-//	PUT             /api/v1/sip-accounts/{uid}   upsert, requires users.admin
-//	DELETE          /api/v1/sip-accounts/{uid}   remove, requires users.admin
+//	GET             /api/v1/sip-accounts/me                 self, any authenticated caller
+//	GET             /api/v1/sip-accounts/me/qr               self, any authenticated caller -- QR onboarding payload
+//	GET             /api/v1/sip-accounts/me/provisioning-url  self, any authenticated caller -- see below
+//	GET             /api/v1/sip-accounts                     list, requires users.admin
+//	PUT             /api/v1/sip-accounts/{uid}                upsert, requires users.admin
+//	DELETE          /api/v1/sip-accounts/{uid}                remove, requires users.admin
 type SipAccountsHandler struct {
 	DB *sql.DB
+	// ProvisioningKey signs the capability tokens /me/provisioning-url mints. Real, deliberate
+	// HMAC (not a DB-stored per-user token): the token is a self-contained,
+	// verify-without-a-lookup credential ("local_uid.hex(HMAC(key, local_uid))"), same
+	// tradeoff class the already-deployed Linphone provisioning URLs made explicit in their own
+	// header comment (a capability URL, like an unlisted calendar feed -- anyone who has the
+	// exact URL can use it, it isn't discoverable by guessing). Required for
+	// /me/provisioning-url to work; empty means the route 503s rather than minting an
+	// unsigned/guessable token.
+	ProvisioningKey []byte
+	// PublicBaseURL is the real, public origin the minted URL points at (e.g.
+	// "https://carepyre.org") -- the actual fetch is served by SipProvisioningFetchHandler,
+	// mounted separately (no bearer auth -- the token itself is the auth) since the native app
+	// fetches it directly, not through an authenticated session.
+	PublicBaseURL string
+	// SipSecretsByExtension holds the real PJSIP password for each real, provisioned extension
+	// (currently just "1000" -- see EMILY/var/carepyre-phone-secret.env, the same real value,
+	// passed in via env var at boot, never hand-typed into this DB). A real, deliberate reversal
+	// of this file's own earlier "sip_accounts is metadata only, no password" decision -- see
+	// this handler's own /me/provisioning-url doc comment for why: founder real-time, 2026-09-05,
+	// "make the sip phone register with just that URL" needs the real secret embedded somewhere,
+	// and an operator-supplied env var (same pattern MAIL_STALWART_ADMIN_PASSWORD/Twilio
+	// credentials already use in this exact codebase) keeps it out of both this DB and any
+	// hand-typed web form.
+	SipSecretsByExtension map[string]string
+}
+
+// mintProvisioningToken and verifyProvisioningToken implement the real, self-contained HMAC
+// capability token described on SipAccountsHandler.ProvisioningKey's own doc comment.
+func mintProvisioningToken(key []byte, localUID int) string {
+	uidStr := strconv.Itoa(localUID)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(uidStr))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString([]byte(uidStr)) + "." + sig
+}
+
+// VerifyProvisioningToken is exported so SipProvisioningFetchHandler (a separate, public,
+// unauthenticated handler -- see its own file) can validate a token without needing a shared
+// import of this handler's own private fields.
+func VerifyProvisioningToken(key []byte, token string) (localUID int, ok bool) {
+	parts := strings.SplitN(token, ".", 2)
+	if len(parts) != 2 {
+		return 0, false
+	}
+	uidBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return 0, false
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write(uidBytes)
+	expected := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
+		return 0, false
+	}
+	uid, err := strconv.Atoi(string(uidBytes))
+	if err != nil {
+		return 0, false
+	}
+	return uid, true
 }
 
 // sipProvisioningPayload -- CAREPYRE-42143124 ("how batteries included can we make the qr code
@@ -80,6 +144,15 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.getMineQR(w, r)
+		return
+	}
+
+	if path == "me/provisioning-url" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.getMineProvisioningURL(w, r)
 		return
 	}
 
@@ -163,6 +236,41 @@ func (h *SipAccountsHandler) getMineQR(w http.ResponseWriter, r *http.Request) {
 		SipServer: acct.SipServer,
 		SipPort:   acct.SipPort,
 		Transport: "UDP",
+	})
+}
+
+// getMineProvisioningURL -- founder real-time, 2026-09-05: "can you set up provisioning URL
+// from the console for users under my sip and make the sip phone register with just that URL?"
+// Mints a real, self-contained capability URL (see SipAccountsHandler.ProvisioningKey's own doc
+// comment) pointing at SipProvisioningFetchHandler -- a SEPARATE, unauthenticated route the
+// native app fetches directly (no bearer token available to a freshly-installed app that hasn't
+// logged in yet). Matches the exact real precedent CarePyre/ops/linphone-provisioning-template.xml's
+// own header comment already named as the right follow-up: "a per-user, authenticated [to MINT,
+// not to FETCH] provisioning endpoint... rather than more static files under more random paths."
+func (h *SipAccountsHandler) getMineProvisioningURL(w http.ResponseWriter, r *http.Request) {
+	if len(h.ProvisioningKey) == 0 || h.PublicBaseURL == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "provisioning URLs not configured"})
+		return
+	}
+	uid := callerLocalUID(r)
+	if uid == nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	// Real, honest check: only mint a URL for a caller who actually has a real sip_accounts row
+	// -- minting one for someone with no assigned extension would just produce a URL that 404s
+	// when fetched, a confusing dead end rather than a clear "ask an admin" message now.
+	if _, err := h.scan(h.DB.QueryRowContext(r.Context(),
+		`SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts WHERE local_uid = ?`, *uid)); err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no SIP account assigned yet -- ask an admin"})
+		return
+	} else if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	token := mintProvisioningToken(h.ProvisioningKey, *uid)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"url": strings.TrimRight(h.PublicBaseURL, "/") + "/api/v1/sip-provisioning/" + token,
 	})
 }
 
