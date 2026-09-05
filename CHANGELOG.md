@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-05 (5)
+- Self-service mail encryption-at-rest: paste a PGP/S-MIME key, encryption enables automatically. Verified live against production Stalwart. (sess-20260905-0720-ec33e7c5)
 - Admin-provisioned mailboxes now link to a local_uid and auto-connect that user's webmail (encrypted password at rest, admin-revealable via new reveal-password endpoint). (sess-20260905-0720-ec33e7c5)
 - Minimal webmail: GET/POST /api/v1/mail/* backed by real JMAP Email/Mailbox/Identity/EmailSubmission calls (sess-20260905-0720-ec33e7c5)
 - SIP provisioning capability-URL endpoint: mint (authenticated) + fetch (public, token-authed) for the native app's one-URL registration (sess-20260905-0720-ec33e7c5)
