@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-09-05 (4)
+- feat(users): CP-SIP-1244543543 — real, generic self-service password change
+  (`POST /api/v1/auth/change-password`), fixing a found-live gap: `PATCH /api/v1/users/{uid}`
+  already changed a password but required `users.admin` with no self-access carve-out (unlike
+  `GET /api/v1/users/{uid}`, which already allows `sub=local:{uid}`), so a regular local user had
+  no way to change their own password at all. Verifies the caller's own current password via
+  bcrypt first; reuses the existing `EventUserPasswordReset` event type. New `sip_accounts`
+  table + `GET/PUT/DELETE /api/v1/sip-accounts` — a real, minimal, honest metadata mapping from a
+  local user to a manually-provisioned Asterisk PJSIP extension (self-read at `/me`, admin CRUD
+  gated on `users.admin`) — real v0 boundary named directly: this doesn't itself provision or
+  reload any Asterisk config, that's real, separate, bigger work. `go test ./...` passes with new
+  regression coverage for both real, found-live permission gaps this closes. Apple #17937.
+
 ## 2026-09-05 (3)
 - chore(ops): real systemd unit (`scripts/idunapro.service`) for the first live IDUNA_PRO
   deployment — CarePyre's own console (`CarePyre/docs/CAREPYRE_CONSOLE_NORTHSTAR.md`). Mirrors
