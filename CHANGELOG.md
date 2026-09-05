@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-05 (5)
+- SIP provisioning capability-URL endpoint: mint (authenticated) + fetch (public, token-authed) for the native app's one-URL registration (sess-20260905-0720-ec33e7c5)
 - Real Stalwart mailbox provisioning: GET/POST /api/v1/mail-accounts, users.admin-gated, JMAP client in internal/mailaccounts/ (sess-20260905-0720-ec33e7c5)
 - Added GET /api/v1/sip-accounts/me/qr: QR onboarding Phase 1 (CAREPYRE-42143124), a real provisioning payload for Android auto-fill, deliberately no password field (sess-20260905-0720-ec33e7c5)
 - Admin genesis: added cmd/admin-grant (CP-SIP-ADMIN-124323), completing pre-existing but uncommitted is_admin schema/projector/API wiring. Fixed a real test-fixture schema drift (2 failing tests) found along the way. Granted frostpenelope1@gmail.com admin live. (sess-20260905-0720-ec33e7c5)
