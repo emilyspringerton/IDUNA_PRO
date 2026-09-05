@@ -125,7 +125,12 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // (uid=0 webmaster, and uid=1) without inventing a second, parallel
 // grant UI for a one-account, interim need.
 func localUserPermissions(u *userlog.LocalUser) []string {
-	if u.LocalUID == 0 {
+	// CP-SIP-ADMIN-124323 ("admin genesis"): u.IsAdmin is the real, general, DB-backed grant
+	// path -- uid=0 (webmaster) still always gets this same set automatically (backward
+	// compatible with every deployment before this field existed), but it's no longer the
+	// ONLY way in. See the LocalUser.IsAdmin field's own doc comment for how a grant actually
+	// happens (idunapro admin-grant <email> for the first one, the real API after that).
+	if u.LocalUID == 0 || u.IsAdmin {
 		return []string{
 			"iduna.admin",
 			"iduna.me.read",

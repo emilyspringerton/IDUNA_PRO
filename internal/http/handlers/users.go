@@ -195,6 +195,10 @@ type updateUserRequest struct {
 	DisplayName *string `json:"display_name,omitempty"`
 	Password    *string `json:"password,omitempty"`
 	Status      *string `json:"status,omitempty"`
+	// IsAdmin -- CP-SIP-ADMIN-124323: the real, ongoing (post-genesis) way one admin grants or
+	// revokes admin on another user, gated the same as every other field here (this whole
+	// route already requires users.admin -- see ServeHTTP's own dispatch).
+	IsAdmin *bool `json:"is_admin,omitempty"`
 }
 
 func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid int) {
@@ -304,6 +308,30 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
 	}
 
+	// Admin grant/revoke (CP-SIP-ADMIN-124323). uid=0 is already always admin regardless of
+	// this field -- a real, harmless no-op if someone tries to toggle it there.
+	if req.IsAdmin != nil {
+		payload, _ := json.Marshal(userlog.UserAdminChangedData{
+			LocalUID: uid,
+			IsAdmin:  *req.IsAdmin,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserAdminChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
 	updated, _ := h.Proj.GetByUID(ctx, uid)
 	if updated == nil {
 		updated = existing
@@ -352,8 +380,11 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		"email":        u.Email,
 		"display_name": u.DisplayName,
 		"status":       u.Status,
-		"created_at":   u.CreatedAt.Format(time.RFC3339),
-		"updated_at":   u.UpdatedAt.Format(time.RFC3339),
+		// is_admin -- CP-SIP-ADMIN-124323: real, so an admin console can show who already
+		// holds admin without guessing from local_uid==0 alone.
+		"is_admin":   u.LocalUID == 0 || u.IsAdmin,
+		"created_at": u.CreatedAt.Format(time.RFC3339),
+		"updated_at": u.UpdatedAt.Format(time.RFC3339),
 	}
 }
 

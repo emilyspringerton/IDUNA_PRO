@@ -31,8 +31,8 @@ func (p *SQLiteProjector) Apply(ctx context.Context, rec Record) error {
 		now := rec.AppendedAt.Format(time.RFC3339)
 		_, err := p.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO local_users
-			 (local_uid, email, display_name, password_hash, status, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'active', ?, ?)`,
+			 (local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'active', 0, ?, ?)`,
 			d.LocalUID, d.Email, d.DisplayName, d.PasswordHash, now, now,
 		)
 		return err
@@ -85,6 +85,18 @@ func (p *SQLiteProjector) Apply(ctx context.Context, rec Record) error {
 		)
 		return err
 
+	case EventUserAdminChanged:
+		var d UserAdminChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return fmt.Errorf("sqlite projector apply admin_changed: %w", err)
+		}
+		now := rec.AppendedAt.Format(time.RFC3339)
+		_, err := p.db.ExecContext(ctx,
+			`UPDATE local_users SET is_admin=?, updated_at=? WHERE local_uid=?`,
+			d.IsAdmin, now, d.LocalUID,
+		)
+		return err
+
 	case EventUserDeleted:
 		var d UserDeletedData
 		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
@@ -122,7 +134,7 @@ func (p *SQLiteProjector) AdvanceCursor(ctx context.Context, seq uint64) error {
 
 func (p *SQLiteProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
 		 FROM local_users WHERE local_uid=? AND status != 'deleted'`,
 		uid,
 	))
@@ -130,14 +142,14 @@ func (p *SQLiteProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, er
 
 func (p *SQLiteProjector) GetByEmail(ctx context.Context, email string) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
 		 FROM local_users WHERE email=? AND status != 'deleted'`,
 		email,
 	))
 }
 
 func (p *SQLiteProjector) ListUsers(ctx context.Context, limit int) ([]LocalUser, error) {
-	q := `SELECT local_uid, email, display_name, password_hash, status, created_at, updated_at
+	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
 	      FROM local_users WHERE status != 'deleted' ORDER BY local_uid ASC`
 	var rows *sql.Rows
 	var err error
@@ -167,9 +179,10 @@ func (p *SQLiteProjector) NextUID(ctx context.Context) (int, error) {
 
 func (p *SQLiteProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	var u LocalUser
+	var isAdmin int
 	var createdStr, updatedStr string
 	err := row.Scan(
-		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status,
+		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin,
 		&createdStr, &updatedStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -178,6 +191,7 @@ func (p *SQLiteProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	if err != nil {
 		return nil, err
 	}
+	u.IsAdmin = isAdmin != 0
 	u.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
 	return &u, nil
@@ -187,13 +201,15 @@ func (p *SQLiteProjector) scanRows(rows *sql.Rows) ([]LocalUser, error) {
 	var out []LocalUser
 	for rows.Next() {
 		var u LocalUser
+		var isAdmin int
 		var createdStr, updatedStr string
 		if err := rows.Scan(
-			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status,
+			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin,
 			&createdStr, &updatedStr,
 		); err != nil {
 			return nil, err
 		}
+		u.IsAdmin = isAdmin != 0
 		u.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
 		u.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
 		out = append(out, u)

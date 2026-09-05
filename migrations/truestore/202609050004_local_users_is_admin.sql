@@ -1,0 +1,12 @@
+-- CP-SIP-ADMIN-124323 ("IDUNAPRO admin accounts have the chicken and egg problem i need an
+-- admin account to create admin accounts how do we achieve admin genesis?").
+--
+-- Real, DB-backed admin flag, generalizing the previous hardcoded "only uid=0 is ever admin"
+-- rule (internal/http/handlers/local_auth.go's own localUserPermissions). uid=0 keeps being
+-- admin automatically (backward compatible, unaffected by this column's own default) -- this
+-- is the mechanism for granting it to anyone else. Real genesis path: `idunapro admin-grant
+-- <email>`, a local CLI command with direct DB access, run once per new admin's first grant --
+-- no API call (and so no existing-admin JWT) needed to bootstrap. Every subsequent admin change
+-- can go through the real API instead (PATCH /api/v1/users/{uid} {"is_admin": true/false},
+-- itself gated on users.admin).
+ALTER TABLE local_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0;

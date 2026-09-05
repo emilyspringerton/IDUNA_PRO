@@ -13,8 +13,18 @@ type LocalUser struct {
 	DisplayName  string
 	PasswordHash string
 	Status       string // "active" | "suspended" | "deleted"
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// IsAdmin -- CP-SIP-ADMIN-124323 ("IDUNAPRO admin accounts have the chicken and egg
+	// problem i need an admin account to create admin accounts how do we achieve admin
+	// genesis?"). Real, DB-backed admin flag, checked by localUserPermissions alongside the
+	// existing LocalUID==0 (webmaster) special case -- uid=0 is still always admin (backward
+	// compatible), but this is the real, general mechanism for granting it to anyone else.
+	// Genesis (the very first non-webmaster admin) is granted via `idunapro admin-grant
+	// <email>`, a local CLI command with direct DB access -- no chicken-and-egg API call
+	// needed. Every admin after that can be granted via the real API
+	// (PATCH /api/v1/users/{uid} {"is_admin": true}, itself gated on users.admin).
+	IsAdmin   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // UserProjector is the interface both SQLite and MySQL projectors implement.
@@ -51,6 +61,10 @@ const (
 	EventUserPasswordReset = "local_user.password_reset"
 	EventUserStatusChanged = "local_user.status_changed"
 	EventUserDeleted       = "local_user.deleted"
+	// EventUserAdminChanged -- CP-SIP-ADMIN-124323. One event type for both grant and revoke
+	// (IsAdmin true/false), matching UserStatusChangedData's own old/new shape rather than
+	// inventing a separate event per direction.
+	EventUserAdminChanged = "local_user.admin_changed"
 )
 
 // ── event payload types ──────────────────────────────────────────────────────
@@ -77,6 +91,11 @@ type UserStatusChangedData struct {
 	LocalUID  int    `json:"local_uid"`
 	OldStatus string `json:"old_status"`
 	NewStatus string `json:"new_status"`
+}
+
+type UserAdminChangedData struct {
+	LocalUID int  `json:"local_uid"`
+	IsAdmin  bool `json:"is_admin"`
 }
 
 type UserDeletedData struct {
