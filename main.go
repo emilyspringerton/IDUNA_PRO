@@ -213,16 +213,30 @@ func main() {
 	// Configured() fallback shape as twilioH above -- an unset MAIL_STALWART_ADMIN_PASSWORD means
 	// the feature is unavailable, not a panic.
 	mailStalwartBaseURL := getenv("MAIL_STALWART_BASE_URL", "https://mail.carepyre.org")
-	mailAccountsH := &handlers.MailAccountsHandler{Client: &mailaccounts.Client{
-		BaseURL:       mailStalwartBaseURL,
-		AdminUser:     getenv("MAIL_STALWART_ADMIN_USER", "admin"),
-		AdminPass:     os.Getenv("MAIL_STALWART_ADMIN_PASSWORD"),
-		DefaultDomain: getenv("MAIL_DEFAULT_DOMAIN", "carepyre.org"),
-	}}
+	// MAIL_CREDENTIALS_KEY encrypts mail_account_credentials.password_enc (see that migration's
+	// own header comment and internal/mailaccounts/crypto.go) -- founder real-time, 2026-09-05:
+	// "after a user provisions their account an admin can provision an email for them and then
+	// the webmail for that user should just work we can still reveal their password for webmail
+	// use somehow." Falls back to JWT_SECRET rather than refusing to start if unset, same
+	// reasoning as SIP_PROVISIONING_KEY above: an empty key just means the linking/auto-connect/
+	// reveal feature is unavailable (both handlers check len(key) == 0), not a panic.
+	mailCredentialsKey := []byte(getenv("MAIL_CREDENTIALS_KEY", os.Getenv("JWT_SECRET")))
+	mailAccountsH := &handlers.MailAccountsHandler{
+		Client: &mailaccounts.Client{
+			BaseURL:       mailStalwartBaseURL,
+			AdminUser:     getenv("MAIL_STALWART_ADMIN_USER", "admin"),
+			AdminPass:     os.Getenv("MAIL_STALWART_ADMIN_PASSWORD"),
+			DefaultDomain: getenv("MAIL_DEFAULT_DOMAIN", "carepyre.org"),
+		},
+		DB:             db,
+		CredentialsKey: mailCredentialsKey,
+	}
 
 	// Real, minimal webmail -- founder real-time, 2026-09-05: "minimal custom webmail in the
 	// console". Any authenticated user, not admin-gated (see webmail.go's own header comment).
-	webmailH := &handlers.WebmailHandler{BaseURL: mailStalwartBaseURL}
+	// DB/CredentialsKey let it auto-connect a user whose mailbox an admin has linked via
+	// mailAccountsH above, with zero manual "Connect" step.
+	webmailH := &handlers.WebmailHandler{BaseURL: mailStalwartBaseURL, DB: db, CredentialsKey: mailCredentialsKey}
 
 	// Kanban board -- see this file's own header comment. BACKLOG_PATH unset (the default) means
 	// a pure, generic, DB-backed board: no markdown sync, no Inbox, no auto-archive-on-done.
@@ -313,6 +327,7 @@ func main() {
 	// (list) and POST (create) share the same permission check either way.
 	mailAccountsProtected := middleware.RequireAuth(keys)(mailAccountsH)
 	mux.Handle("/api/v1/mail-accounts", mailAccountsProtected)
+	mux.Handle("/api/v1/mail-accounts/", mailAccountsProtected)
 
 	// Real, minimal webmail -- any authenticated user, no users.admin gate.
 	webmailProtected := middleware.RequireAuth(keys)(webmailH)

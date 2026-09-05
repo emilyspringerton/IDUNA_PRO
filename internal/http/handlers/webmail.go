@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -21,10 +22,17 @@ import (
 // internal/mailaccounts/client.go's own header comment), so there's no way for this server to
 // act "as" a user's mailbox without that user's own real email+password. Real, minimal v0
 // design: a user "connects" their mailbox once per server-process-lifetime by submitting their
-// own Stalwart credential; it's held ONLY in this handler's own in-memory map, keyed by their
-// IDUNA_PRO local_uid, NEVER written to disk or the local DB. A service restart forgets every
-// connection (a real, accepted tradeoff for not persisting a mailbox password anywhere at
-// rest) -- named honestly, not hidden.
+// own Stalwart credential; it's held in this handler's own in-memory map, keyed by their
+// IDUNA_PRO local_uid, NEVER written to disk or the local DB from THIS path.
+//
+// 2026-09-05 update (founder real-time: "after a user provisions their account an admin can
+// provision an email for them and then the webmail for that user should just work"): when an
+// admin links a mailbox to a local_uid via MailAccountsHandler, the real password is persisted
+// ENCRYPTED in mail_account_credentials (see that migration's own header comment). This handler
+// now falls back to that table on a cache miss -- decrypts once, caches the result in the same
+// in-memory map used by the manual-connect path, and the user's webmail just works with zero
+// manual "Connect" step. A user who connects manually (e.g. an untethered mailbox not linked to
+// their uid) still works exactly as before; nothing here is written back to the DB.
 //
 // Routes (all require Bearer JWT via middleware.RequireAuth):
 //
@@ -36,8 +44,40 @@ import (
 type WebmailHandler struct {
 	BaseURL string // e.g. "https://mail.carepyre.org"
 
+	// DB and CredentialsKey enable the admin-provisioned auto-connect path above. Both nil/empty
+	// means this handler behaves exactly as it did before 2026-09-05: manual connect only.
+	DB             *sql.DB
+	CredentialsKey []byte
+
 	mu          sync.RWMutex
 	connections map[int]webmailConnection
+}
+
+// autoConnect looks up a persisted, admin-linked mailbox credential for uid and, if found,
+// decrypts it and caches it in the in-memory connections map -- the same map the manual /connect
+// path populates. Returns ok=false (never an error the caller need surface) when there's simply
+// nothing to auto-connect, which is the normal case for any user without an admin-linked mailbox.
+func (h *WebmailHandler) autoConnect(uid int) (webmailConnection, bool) {
+	if h.DB == nil || len(h.CredentialsKey) == 0 {
+		return webmailConnection{}, false
+	}
+	var email, enc string
+	err := h.DB.QueryRow(`SELECT email, password_enc FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc)
+	if err != nil {
+		return webmailConnection{}, false
+	}
+	password, err := mailaccounts.DecryptSecret(h.CredentialsKey, enc)
+	if err != nil {
+		return webmailConnection{}, false
+	}
+	conn := webmailConnection{Email: email, Password: password}
+	h.mu.Lock()
+	if h.connections == nil {
+		h.connections = map[int]webmailConnection{}
+	}
+	h.connections[uid] = conn
+	h.mu.Unlock()
+	return conn, true
 }
 
 type webmailConnection struct {
@@ -50,7 +90,10 @@ func (h *WebmailHandler) client(uid int) (*mailaccounts.Client, string, bool) {
 	conn, ok := h.connections[uid]
 	h.mu.RUnlock()
 	if !ok {
-		return nil, "", false
+		conn, ok = h.autoConnect(uid)
+		if !ok {
+			return nil, "", false
+		}
 	}
 	return &mailaccounts.Client{
 		BaseURL:   h.BaseURL,
@@ -88,6 +131,9 @@ func (h *WebmailHandler) status(w http.ResponseWriter, uid int) {
 	h.mu.RLock()
 	conn, ok := h.connections[uid]
 	h.mu.RUnlock()
+	if !ok {
+		conn, ok = h.autoConnect(uid)
+	}
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"connected": false})
 		return
