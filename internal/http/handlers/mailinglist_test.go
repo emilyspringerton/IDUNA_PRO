@@ -152,6 +152,82 @@ func TestMailingListExport_CSVFormat(t *testing.T) {
 	}
 }
 
+// TestMailingListPageHandler_ServesHTML -- S245-04's settings page renders,
+// GET only.
+func TestMailingListPageHandler_ServesHTML(t *testing.T) {
+	h := &handlers.MailingListPageHandler{}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/mailing-list", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "Mailing List") {
+		t.Error("expected page title in body")
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/admin/mailing-list", nil)
+	postRec := httptest.NewRecorder()
+	h.ServeHTTP(postRec, postReq)
+	if postRec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST status = %d, want 405", postRec.Code)
+	}
+}
+
+// TestMailingListAdminSummary_ReflectsRealCountsAndVaultState -- S245-04's
+// real data source: total/synced counts and vault lock state come back
+// accurately, with no PII (no email fields at all in this response).
+func TestMailingListAdminSummary_ReflectsRealCountsAndVaultState(t *testing.T) {
+	store, err := mailinglist.Open(t.TempDir() + "/mailinglist.db")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	vault := mailinglist.NewVault()
+	h := &handlers.MailingListHandler{Store: store, Vault: vault}
+
+	if _, err := store.AddSubscriber([]byte("ct1"), []byte("n1"), "v1", "general"); err != nil {
+		t.Fatalf("AddSubscriber 1: %v", err)
+	}
+	id2, err := store.AddSubscriber([]byte("ct2"), []byte("n2"), "v1", "stinkies")
+	if err != nil {
+		t.Fatalf("AddSubscriber 2: %v", err)
+	}
+	if err := store.MarkMailchimpSynced(id2); err != nil {
+		t.Fatalf("MarkMailchimpSynced: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/mailing-list/api/summary", nil)
+	rec := httptest.NewRecorder()
+	h.AdminSummary(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var out struct {
+		Total       int  `json:"total"`
+		Synced      int  `json:"synced"`
+		VaultLocked bool `json:"vault_locked"`
+		BySource    []struct {
+			Source string
+			Count  int
+		} `json:"by_source"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 2 || out.Synced != 1 || !out.VaultLocked {
+		t.Fatalf("unexpected summary: %+v", out)
+	}
+	if len(out.BySource) != 2 {
+		t.Fatalf("expected 2 source breakdown rows, got %+v", out.BySource)
+	}
+}
+
 // TestMailchimpSettings_GetReflectsNotConfigured -- a brand-new instance
 // (EINHORN's own, or any product tenant that hasn't set anything) reports
 // configured=false, not an error.

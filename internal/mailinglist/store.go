@@ -151,6 +151,16 @@ func (s *Store) CountBySource(source string) (int, error) {
 	return n, err
 }
 
+// SyncedCount returns how many subscribers have mailchimp_synced = 1 -- for
+// S245-04's admin settings page ("view subscriber count/sync status"). Same
+// PII-free reasoning as Count/CountBySource: a boolean flag and a count,
+// never email_ciphertext.
+func (s *Store) SyncedCount() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM subscribers WHERE mailchimp_synced = 1`).Scan(&n)
+	return n, err
+}
+
 // Count returns the total subscriber count across every source -- for the
 // Back Office dashboard (founder, live: "dashboard can show email signups
 // stats"). Same PII-free reasoning as CountBySource: plaintext source/count

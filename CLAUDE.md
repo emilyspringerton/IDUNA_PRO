@@ -36,7 +36,12 @@ permission — stored settings win over the env-var fallback once the vault is u
 Generalized on the way out: no hardcoded AllowOrigin/per-product MailchimpLists (those were the
 real, checked EINHORN-specific parts) — a tenant sets `MAILING_LIST_ALLOW_ORIGIN` instead. Live-
 verified: fresh-SQLite boot, migrations applied (`mailinglist.export`/`mailinglist.admin` both
-present), `/health` OK. Unblocks S245-04's settings page in this repo's own admin surface.
+present), `/health` OK.
+
+**Real, shipped (2026-09-05, S245-04)**: the "consoleify" settings page at `/admin/mailing-list`
+— real subscriber count/sync status (new `Store.SyncedCount`), the Mailchimp settings form, and
+CSV/JSON export, all reusing the S245-01/02/03 handler methods directly (no duplicated logic).
+Same cookie-vs-bearer dual-entry-point split as the kanban board.
 
 Not yet built: the extensibility hook contract (PARENA mods via `burrow build`), a docs site,
 an online editor, `console.okemily.com`, or the tenant-provisioning control plane (all real,

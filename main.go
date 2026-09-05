@@ -280,6 +280,27 @@ func main() {
 	})))
 	mux.Handle("/api/v1/mailing-list/settings/mailchimp", mailingListSettingsProtected)
 
+	// S245-04: cookie-authenticated admin settings page, mounted alongside the
+	// kanban board's own admin surface (S243-08) -- same real "one handler,
+	// two entry points" split kanban already established.
+	mailingListPageProtected := middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(&handlers.MailingListPageHandler{}))
+	mux.Handle("/admin/mailing-list", mailingListPageProtected)
+	mailingListAdminAPI := middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			mailingListH.GetMailchimpSettings(w, r)
+		case http.MethodPut:
+			mailingListH.PutMailchimpSettings(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/admin/mailing-list/api/settings/mailchimp", mailingListAdminAPI)
+	mux.Handle("/admin/mailing-list/api/summary",
+		middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(http.HandlerFunc(mailingListH.AdminSummary))))
+	mux.Handle("/admin/mailing-list/api/export",
+		middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(http.HandlerFunc(mailingListH.Export))))
+
 	// Replay unapplied user events on startup (same real, established pattern IDUNA itself uses).
 	if err := userlog.ReplayUnapplied(context.Background(), uel, userProj); err != nil {
 		log.Printf("user event replay: %v (continuing)", err)

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-05 (2)
+- feat(mailinglist): S245-04 "consoleify" real settings page shipped at `/admin/mailing-list`,
+  mounted alongside the kanban board's own admin surface (S243-08), same "one handler, two entry
+  points" cookie-vs-bearer split. Shows real subscriber count/sync-status/vault-lock state (new
+  `Store.SyncedCount` + `MailingListHandler.AdminSummary`, both PII-free — no email fields in the
+  response), a Mailchimp settings form (reuses S245-03's `GetMailchimpSettings`/
+  `PutMailchimpSettings` — no partial update, both fields required together, matching the API's
+  own real constraint), and CSV/JSON export links (reuses S245-02's `Export`). Cream/gold ceremony
+  style tokens copied from `kanban_page.go` rather than reinvented. Fixed a real, pre-existing dead
+  link along the way: kanban's own page linked to `/admin`, a route that was never registered in
+  this repo — replaced with a working cross-link to the new page. 2 new tests
+  (`TestMailingListPageHandler_ServesHTML`, `TestMailingListAdminSummary_ReflectsRealCountsAndVaultState`).
+  `go test ./...` clean; live-verified booting the real binary — `/admin/mailing-list`,
+  `/admin/mailing-list/api/summary`, and `/admin/kanban` all correctly 401 without a session
+  cookie, no panics.
+
 ## 2026-09-05 (1)
 - feat(mailinglist): S245-05 extraction from IDUNA — the mailing-list vault subsystem is now real
   here too. `internal/mailinglist` copied verbatim (zero cross-imports made this a real, clean

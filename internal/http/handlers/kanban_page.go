@@ -146,7 +146,7 @@ const kanbanPageHTML = `<!doctype html>
     <h1>Kanban</h1>
     <div class="sub">A shared board for human/agent work handoff — drag a card between columns to prioritize it. If this instance is configured with a markdown backlog file, open items appear in Inbox and completed items automatically drop off the board (see your instance's own docs).</div>
   </div>
-  <div class="sub"><a href="/admin">← Back Office</a></div>
+  <div class="sub"><a href="/admin/mailing-list">Mailing list →</a></div>
 </header>
 <main>
   <div class="board">

@@ -53,6 +53,34 @@ func (h *MailingListHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/mailing-list/init", h.init)
 }
 
+// AdminSummary -- S245-04's settings-page data source: real subscriber
+// count/sync status, PII-free (same reasoning as Store.Count/CountBySource).
+// Registered in main.go behind cookie auth + iduna.admin, alongside the
+// kanban board's own admin surface.
+func (h *MailingListHandler) AdminSummary(w http.ResponseWriter, r *http.Request) {
+	total, err := h.Store.Count()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal error"})
+		return
+	}
+	synced, err := h.Store.SyncedCount()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal error"})
+		return
+	}
+	bySource, err := h.Store.CountsBySource()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal error"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total":        total,
+		"synced":       synced,
+		"vault_locked": h.Vault.Locked(),
+		"by_source":    bySource,
+	})
+}
+
 // Export is the S245-02 endpoint (registered separately in main.go, behind
 // RequireAuth + RequirePermission("mailinglist.export") — unlike Register's
 // routes above, this one needs a real JWT-bearer identity, not the loopback
