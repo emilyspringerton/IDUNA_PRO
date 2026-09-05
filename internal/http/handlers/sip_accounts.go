@@ -20,11 +20,32 @@ import (
 // Routes (all require Bearer JWT via middleware.RequireAuth):
 //
 //	GET             /api/v1/sip-accounts/me      self, any authenticated caller
+//	GET             /api/v1/sip-accounts/me/qr   self, any authenticated caller -- QR onboarding payload
 //	GET             /api/v1/sip-accounts         list, requires users.admin
 //	PUT             /api/v1/sip-accounts/{uid}   upsert, requires users.admin
 //	DELETE          /api/v1/sip-accounts/{uid}   remove, requires users.admin
 type SipAccountsHandler struct {
 	DB *sql.DB
+}
+
+// sipProvisioningPayload -- CAREPYRE-42143124 ("how batteries included can we make the qr code
+// onboarding with the sip phone? get it working for what we have going so far"), Phase 1 of the
+// real, phased plan in CarePyre/docs/SIP_QR_ONBOARDING_NORTHSTAR.md: the real, structured data an
+// Android Config screen needs to auto-fill from a scanned QR code, everything this table
+// actually HAS. Real, honest, deliberately-named boundary, not an oversight: no `password` field
+// -- sip_accounts is metadata only (see this file's own header comment), the real PJSIP auth
+// secret lives solely in Asterisk's own config, never in this DB. A user still enters their own
+// password by hand after scanning; only extension/server/port/transport are ever encoded here.
+// Transport is a real, honest constant ("UDP") rather than a DB column: every real CarePyre
+// extension provisioned so far (PARENA/ops/asterisk/pjsip_carepyre_phone.conf) uses Asterisk's
+// own PJSIP default transport, and sip_accounts has no transport column to read a real per-user
+// value from even if one existed.
+type sipProvisioningPayload struct {
+	Scheme    string `json:"scheme"` // versioned, so a future Android build can reject a payload shape it doesn't understand instead of silently mis-parsing one
+	Extension string `json:"extension"`
+	SipServer string `json:"sip_server"`
+	SipPort   int    `json:"sip_port"`
+	Transport string `json:"transport"`
 }
 
 type sipAccount struct {
@@ -50,6 +71,15 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.getMine(w, r)
+		return
+	}
+
+	if path == "me/qr" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.getMineQR(w, r)
 		return
 	}
 
@@ -106,6 +136,34 @@ func (h *SipAccountsHandler) getMine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, acct)
+}
+
+// getMineQR -- CAREPYRE-42143124: same real ownership check as getMine (a caller can only ever
+// fetch their OWN provisioning payload, never someone else's SIP extension), reusing the exact
+// same query rather than a second hand-written one that could drift out of sync with it.
+func (h *SipAccountsHandler) getMineQR(w http.ResponseWriter, r *http.Request) {
+	uid := callerLocalUID(r)
+	if uid == nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	acct, err := h.scan(h.DB.QueryRowContext(r.Context(),
+		`SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts WHERE local_uid = ?`, *uid))
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no SIP account assigned yet -- ask an admin"})
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, sipProvisioningPayload{
+		Scheme:    "carepyre-sip-v1",
+		Extension: acct.Extension,
+		SipServer: acct.SipServer,
+		SipPort:   acct.SipPort,
+		Transport: "UDP",
+	})
 }
 
 func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {

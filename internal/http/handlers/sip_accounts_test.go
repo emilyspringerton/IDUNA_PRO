@@ -131,6 +131,65 @@ func TestSipAccounts_CannotReadSomeoneElses(t *testing.T) {
 	}
 }
 
+// TestSipAccounts_QRPayload -- CAREPYRE-42143124: the real, honest provisioning shape a
+// scanning Android Config screen would auto-fill from -- extension/server/port/transport, and
+// deliberately NOT a password field (sip_accounts never stores one, see sip_accounts.go's own
+// header comment on why).
+func TestSipAccounts_QRPayload(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port) VALUES (5, '1000', '198.58.107.85', 5060)`); err != nil {
+		t.Fatalf("seed sip_accounts: %v", err)
+	}
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me/qr", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 5))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("qr payload: status = %d, body = %s, want 200", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["scheme"] != "carepyre-sip-v1" {
+		t.Errorf("scheme = %v, want carepyre-sip-v1", got["scheme"])
+	}
+	if got["extension"] != "1000" || got["sip_server"] != "198.58.107.85" || got["transport"] != "UDP" {
+		t.Errorf("unexpected payload: %+v", got)
+	}
+	if _, hasPassword := got["password"]; hasPassword {
+		t.Errorf("qr payload must never include a password field -- sip_accounts doesn't store one, got: %+v", got)
+	}
+}
+
+// TestSipAccounts_QRPayloadIsSelfOnly -- same real ownership boundary as /me: a caller only ever
+// gets THEIR OWN provisioning payload.
+func TestSipAccounts_QRPayloadIsSelfOnly(t *testing.T) {
+	keys, err := jwt.GenerateKeys()
+	if err != nil {
+		t.Fatalf("generate keys: %v", err)
+	}
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port) VALUES (5, '1000', '198.58.107.85', 5060)`); err != nil {
+		t.Fatalf("seed sip_accounts: %v", err)
+	}
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts/me/qr", nil)
+	req.Header.Set("Authorization", "Bearer "+sipAccountsSignToken(t, keys, 6))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("different caller: status = %d, want 404 (their own, unassigned record)", w.Code)
+	}
+}
+
 // TestSipAccounts_ListRequiresAdmin -- the admin list route rejects a caller with no
 // users.admin permission.
 func TestSipAccounts_ListRequiresAdmin(t *testing.T) {
