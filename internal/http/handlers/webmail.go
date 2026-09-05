@@ -41,6 +41,10 @@ import (
 //	GET   /api/v1/mail/messages          self -- real Inbox list, newest first
 //	GET   /api/v1/mail/messages/{id}     self -- one real full message
 //	POST  /api/v1/mail/send              self -- {"to": "...", "subject": "...", "body": "..."}
+//	GET   /api/v1/mail/encryption        self -- {"enabled": bool, "cipher": "..."}
+//	POST  /api/v1/mail/encryption        self -- {"key": "<armored PGP key or PEM cert>"} --
+//	                                      see mailaccounts.Client.AddEncryptionKey's own doc
+//	                                      comment for why this is the real ceiling of "automatic"
 type WebmailHandler struct {
 	BaseURL string // e.g. "https://mail.carepyre.org"
 
@@ -122,6 +126,10 @@ func (h *WebmailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.getMessage(w, r, *uid, strings.TrimPrefix(path, "messages/"))
 	case path == "send" && r.Method == http.MethodPost:
 		h.send(w, r, *uid)
+	case path == "encryption" && r.Method == http.MethodGet:
+		h.encryptionStatus(w, r, *uid)
+	case path == "encryption" && r.Method == http.MethodPost:
+		h.addEncryptionKey(w, r, *uid)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -229,4 +237,56 @@ func (h *WebmailHandler) send(w http.ResponseWriter, r *http.Request, uid int) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+}
+
+func (h *WebmailHandler) encryptionStatus(w http.ResponseWriter, r *http.Request, uid int) {
+	c, _, ok := h.client(uid)
+	if !ok {
+		writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": "not connected -- POST /api/v1/mail/connect first"})
+		return
+	}
+	status, err := c.GetEncryptionStatus(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+type addEncryptionKeyRequest struct {
+	Key string `json:"key"`
+}
+
+// addEncryptionKey -- founder real-time, 2026-09-05: "all of the mailboxes that are created via
+// the console need to be set automatically to encrypted at rest." Real, verified-live constraint
+// (see mailaccounts.Client.AddEncryptionKey's own doc comment): Stalwart can't encrypt anything
+// until the account has a real OpenPGP public key or S/MIME certificate on file. This route is
+// the actual "automatic" trigger -- the moment the mailbox owner (or an admin who has their
+// credential via the reveal-password flow) pastes a real key here, encryption turns on
+// immediately, with zero separate step.
+func (h *WebmailHandler) addEncryptionKey(w http.ResponseWriter, r *http.Request, uid int) {
+	c, email, ok := h.client(uid)
+	if !ok {
+		writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": "not connected -- POST /api/v1/mail/connect first"})
+		return
+	}
+	var req addEncryptionKeyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	req.Key = strings.TrimSpace(req.Key)
+	if req.Key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "key is required (an OpenPGP public key or S/MIME certificate)"})
+		return
+	}
+	status, err := c.AddEncryptionKey(r.Context(), req.Key, "added via CarePyre console for "+email)
+	if err != nil {
+		// Real, honest passthrough -- Stalwart's own validation error (not a real key, wrong
+		// format, etc.) shows here verbatim, same convention this codebase already established
+		// for Twilio/mail-account errors.
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }

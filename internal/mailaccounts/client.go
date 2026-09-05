@@ -388,6 +388,163 @@ type Account struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
+// EncryptionStatus reports whether an account's mail is currently encrypted at rest --
+// founder real-time, 2026-09-05: "all of the mailboxes that are created via the console need to
+// be set automatically to encrypted at rest." Real, verified-live constraint (captured against
+// production mail.carepyre.org, 2026-09-05): Stalwart cannot encrypt anything until the account
+// has a real OpenPGP public key or S/MIME certificate on file -- there is no "just turn it on"
+// switch, and IDUNA_PRO deliberately does NOT generate a keypair on a user's behalf (it would
+// either have to hand them the private key exactly once, which is easy to lose forever, or keep
+// it itself, which defeats the entire point). So "automatic" here means: the moment a real key is
+// added (AddEncryptionKey below), encryption turns on immediately with no separate step -- that
+// is the actual, honest ceiling of "automatic" for this feature.
+type EncryptionStatus struct {
+	Enabled bool   `json:"enabled"`
+	Cipher  string `json:"cipher,omitempty"` // "Aes128" | "Aes256" | "Aes256Gcm" | "ChaCha20Poly1305"
+}
+
+// GetEncryptionStatus reads the CALLER's own x:AccountSettings/get singleton (self accountId,
+// resolved from the client's own credentials -- see AddEncryptionKey's own doc comment for why
+// this must always be the mailbox owner's real credential, never an admin's).
+func (c *Client) GetEncryptionStatus(ctx context.Context) (EncryptionStatus, error) {
+	if !c.Configured() {
+		return EncryptionStatus{}, fmt.Errorf("mailaccounts: not configured")
+	}
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+	accountID, err := c.session(ctx, token)
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+	results, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"x:AccountSettings/get", map[string]any{"accountId": accountID}, "0"},
+	})
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+	var get struct {
+		List []struct {
+			EncryptionAtRest struct {
+				Type string `json:"@type"`
+			} `json:"encryptionAtRest"`
+		} `json:"list"`
+	}
+	if err := json.Unmarshal(results["0"], &get); err != nil {
+		return EncryptionStatus{}, err
+	}
+	if len(get.List) == 0 || get.List[0].EncryptionAtRest.Type == "" || get.List[0].EncryptionAtRest.Type == "Disabled" {
+		return EncryptionStatus{Enabled: false}, nil
+	}
+	return EncryptionStatus{Enabled: true, Cipher: get.List[0].EncryptionAtRest.Type}, nil
+}
+
+// AddEncryptionKey uploads a real OpenPGP public key or S/MIME certificate (armored/PEM text,
+// whatever the mailbox owner pastes -- Stalwart itself validates the format, see this method's
+// own real, honest passthrough of its error below) as a new x:PublicKey, then immediately enables
+// encryption at rest referencing it -- this IS the "automatic" trigger the founder asked for:
+// there is no separate admin step between "a key exists" and "mail gets encrypted."
+//
+// Real, deliberate architecture note verified live, 2026-09-05: this MUST be called with a
+// *Client authenticated as the mailbox owner's own real Stalwart credential (never the admin
+// account) -- x:PublicKey/set and x:AccountSettings/set both operate on the calling client's own
+// self accountId (there is no "target user" parameter), matching WebmailHandler's own established
+// per-user client() pattern. An admin acting "on behalf of" a user (e.g. via the console's
+// reveal-password flow) still goes through this same self-as-that-user path, just admin-initiated.
+//
+// Cipher selection, verified live: Stalwart's strongest cipher (Aes256Gcm, an AEAD mode) is
+// S/MIME-only -- an OpenPGP key is rejected with "AES-256-GCM is only supported for S/MIME
+// encryption, but the selected public key is an OpenPGP key." rather than any success/failure
+// signal we could otherwise use to detect key type ourselves, so this tries Aes256Gcm first and
+// falls back to Aes256 (the strongest PGP-compatible cipher) on exactly that error, instead of
+// parsing the key material client-side to guess its type.
+func (c *Client) AddEncryptionKey(ctx context.Context, keyText, description string) (EncryptionStatus, error) {
+	if !c.Configured() {
+		return EncryptionStatus{}, fmt.Errorf("mailaccounts: not configured")
+	}
+	token, err := c.authenticate(ctx)
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+	accountID, err := c.session(ctx, token)
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+
+	pkResults, err := c.jmapCall(ctx, token, accountID, []any{
+		[]any{"x:PublicKey/set", map[string]any{
+			"accountId": accountID,
+			"create": map[string]any{
+				"new-0": map[string]any{
+					"@type":       "PublicKey",
+					"key":         keyText,
+					"description": description,
+				},
+			},
+		}, "0"},
+	})
+	if err != nil {
+		return EncryptionStatus{}, err
+	}
+	var pkResp struct {
+		Created    map[string]struct{ ID string } `json:"created"`
+		NotCreated map[string]struct {
+			Description string `json:"description"`
+			Type        string `json:"type"`
+		} `json:"notCreated"`
+	}
+	if err := json.Unmarshal(pkResults["0"], &pkResp); err != nil {
+		return EncryptionStatus{}, err
+	}
+	if nc, ok := pkResp.NotCreated["new-0"]; ok {
+		return EncryptionStatus{}, fmt.Errorf("mailaccounts: %s: %s", nc.Type, nc.Description)
+	}
+	created, ok := pkResp.Created["new-0"]
+	if !ok {
+		return EncryptionStatus{}, fmt.Errorf("mailaccounts: public key was not created (no error given)")
+	}
+
+	for _, cipher := range []string{"Aes256Gcm", "Aes256"} {
+		setResults, err := c.jmapCall(ctx, token, accountID, []any{
+			[]any{"x:AccountSettings/set", map[string]any{
+				"accountId": accountID,
+				"update": map[string]any{
+					"singleton": map[string]any{
+						"encryptionAtRest": map[string]any{
+							"@type":             cipher,
+							"publicKey":         created.ID,
+							"encryptOnAppend":   true,
+							"allowSpamTraining": false,
+						},
+					},
+				},
+			}, "0"},
+		})
+		if err != nil {
+			return EncryptionStatus{}, err
+		}
+		var setResp struct {
+			Updated    map[string]any `json:"updated"`
+			NotUpdated map[string]struct {
+				Description string `json:"description"`
+				Type        string `json:"type"`
+			} `json:"notUpdated"`
+		}
+		if err := json.Unmarshal(setResults["0"], &setResp); err != nil {
+			return EncryptionStatus{}, err
+		}
+		if nu, ok := setResp.NotUpdated["singleton"]; ok {
+			if cipher == "Aes256Gcm" && strings.Contains(nu.Description, "only supported for S/MIME") {
+				continue // real, live-verified fallback -- see this method's own header comment
+			}
+			return EncryptionStatus{}, fmt.Errorf("mailaccounts: %s: %s", nu.Type, nu.Description)
+		}
+		return EncryptionStatus{Enabled: true, Cipher: cipher}, nil
+	}
+	return EncryptionStatus{}, fmt.Errorf("mailaccounts: could not enable encryption with any supported cipher")
+}
+
 // ---- Minimal webmail (founder real-time, 2026-09-05: "minimal custom webmail in the
 // console") ----
 //
