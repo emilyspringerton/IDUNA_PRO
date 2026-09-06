@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-06
+
+- New GET /api/v1/sip-accounts/me/webphone-credentials + WEBPHONE_SECRETS_JSON: Web Phone credentials are now per-user, not hardcoded to extension 1000. (sess-20260905-0720-ec33e7c5)
+
+
 ## 2026-09-05 (5)
 - Self-service mail encryption-at-rest: paste a PGP/S-MIME key, encryption enables automatically. Verified live against production Stalwart. (sess-20260905-0720-ec33e7c5)
 - Admin-provisioned mailboxes now link to a local_uid and auto-connect that user's webmail (encrypted password at rest, admin-revealable via new reveal-password endpoint). (sess-20260905-0720-ec33e7c5)
