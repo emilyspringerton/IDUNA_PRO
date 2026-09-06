@@ -179,6 +179,18 @@ func main() {
 			log.Printf("sip-provisioning: SIP_SECRETS_JSON is not valid JSON, ignoring: %v", err)
 		}
 	}
+	// WEBPHONE_SECRETS_JSON -- same real pattern as SIP_SECRETS_JSON above, one entry per real
+	// "<extension>web" WebRTC endpoint provisioned by sudo-queue/72-provision-web-extension.sh
+	// (founder real-time, 2026-09-06: "i am expecting to only see the web sip phone if there is
+	// an extension configured for that user and then if its not 1000 im still expecting it to
+	// work"). Keyed by the BASE extension (e.g. "1000"), matching sip_accounts.extension, not by
+	// the "<extension>web" identity itself. Format: {"1000":"<carepyre-webphone-secret.env value>"}.
+	webphoneSecretsByExtension := map[string]string{}
+	if raw := os.Getenv("WEBPHONE_SECRETS_JSON"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &webphoneSecretsByExtension); err != nil {
+			log.Printf("sip-provisioning: WEBPHONE_SECRETS_JSON is not valid JSON, ignoring: %v", err)
+		}
+	}
 	// SIP_PROVISIONING_KEY signs the capability tokens -- a real, random secret, distinct from
 	// JWT_SECRET (this token's own trust boundary is different: it's a long-lived, unauthenticated
 	// bearer-of-the-URL credential, not a short-lived session JWT). Falls back to JWT_SECRET
@@ -190,10 +202,11 @@ func main() {
 	// block) -- bare baseURL ("https://carepyre.org") would mint a URL nginx routes to a
 	// completely different, unrelated service (the plain IDUNA on :8080), not this one.
 	sipAccountsH := &handlers.SipAccountsHandler{
-		DB:                    db,
-		ProvisioningKey:       sipProvisioningKey,
-		PublicBaseURL:         baseURL + "/console-api",
-		SipSecretsByExtension: sipSecretsByExtension,
+		DB:                         db,
+		ProvisioningKey:            sipProvisioningKey,
+		PublicBaseURL:              baseURL + "/console-api",
+		SipSecretsByExtension:      sipSecretsByExtension,
+		WebphoneSecretsByExtension: webphoneSecretsByExtension,
 	}
 	sipProvisioningFetchH := &handlers.SipProvisioningFetchHandler{
 		DB:                    db,

@@ -26,6 +26,7 @@ import (
 //	GET             /api/v1/sip-accounts/me                 self, any authenticated caller
 //	GET             /api/v1/sip-accounts/me/qr               self, any authenticated caller -- QR onboarding payload
 //	GET             /api/v1/sip-accounts/me/provisioning-url  self, any authenticated caller -- see below
+//	GET             /api/v1/sip-accounts/me/webphone-credentials  self, any authenticated caller -- see below
 //	GET             /api/v1/sip-accounts                     list, requires users.admin
 //	PUT             /api/v1/sip-accounts/{uid}                upsert, requires users.admin
 //	DELETE          /api/v1/sip-accounts/{uid}                remove, requires users.admin
@@ -55,6 +56,15 @@ type SipAccountsHandler struct {
 	// credentials already use in this exact codebase) keeps it out of both this DB and any
 	// hand-typed web form.
 	SipSecretsByExtension map[string]string
+	// WebphoneSecretsByExtension holds the real PJSIP password for each real, provisioned
+	// "<extension>web" WebRTC endpoint (see PARENA/ops/asterisk/pjsip_carepyre_webphone.conf and
+	// sudo-queue/72-provision-web-extension.sh), keyed by the BASE extension (e.g. "1000", not
+	// "1000web") to match SipSecretsByExtension's own keying convention. Founder real-time,
+	// 2026-09-06: "i am expecting to only see the web sip phone if there is an extension
+	// configured for that user and then if its not 1000 im still expecting it to work" -- this
+	// is what makes the console's embedded Web Phone work for ANY provisioned user, not just the
+	// one extension (1000/1000web) that existed before this.
+	WebphoneSecretsByExtension map[string]string
 }
 
 // mintProvisioningToken and verifyProvisioningToken implement the real, self-contained HMAC
@@ -153,6 +163,15 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.getMineProvisioningURL(w, r)
+		return
+	}
+
+	if path == "me/webphone-credentials" {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.getMineWebphoneCredentials(w, r)
 		return
 	}
 
@@ -271,6 +290,48 @@ func (h *SipAccountsHandler) getMineProvisioningURL(w http.ResponseWriter, r *ht
 	token := mintProvisioningToken(h.ProvisioningKey, *uid)
 	writeJSON(w, http.StatusOK, map[string]string{
 		"url": strings.TrimRight(h.PublicBaseURL, "/") + "/api/v1/sip-provisioning/" + token,
+	})
+}
+
+// getMineWebphoneCredentials -- founder real-time, 2026-09-06: "i am expecting to only see the
+// web sip phone if there is an extension configured for that user and then if its not 1000 im
+// still expecting it to work ... is that reasonable?" Real, honest yes: unlike the native
+// provisioning-URL flow (which has to be unauthenticated, since a freshly-installed app has no
+// bearer token yet), the console embedding the Web Phone iframe is ALREADY an authenticated
+// session -- so this can just be a plain, bearer-authenticated self-read, no HMAC capability
+// token needed. Returns the real "<extension>web" identity + its own real PJSIP password
+// (WebphoneSecretsByExtension, keyed by the base extension -- see that field's own doc comment)
+// so the console can auto-register the embedded webphone with zero manual typing, for WHICHEVER
+// extension this caller actually has -- not hardcoded to 1000.
+func (h *SipAccountsHandler) getMineWebphoneCredentials(w http.ResponseWriter, r *http.Request) {
+	uid := callerLocalUID(r)
+	if uid == nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	acct, err := h.scan(h.DB.QueryRowContext(r.Context(),
+		`SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts WHERE local_uid = ?`, *uid))
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no SIP account assigned yet -- ask an admin"})
+		return
+	}
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	password := h.WebphoneSecretsByExtension[acct.Extension]
+	if password == "" {
+		// Real, honest gap: this user has a real extension assigned, but no matching WebRTC
+		// endpoint has been provisioned for it yet (see sudo-queue/72-provision-web-extension.sh)
+		// -- surfaced plainly rather than returning an empty password the browser would just
+		// fail to register with anyway.
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no web phone configured for this extension yet -- ask an admin"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"extension": acct.Extension + "web",
+		"domain":    "carepyre.org",
+		"password":  password,
 	})
 }
 
