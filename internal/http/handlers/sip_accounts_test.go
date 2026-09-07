@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,11 +31,31 @@ func newTestSipAccountsDB(t *testing.T) *sql.DB {
 		sip_server  VARCHAR(255) NOT NULL,
 		sip_port    INTEGER  NOT NULL DEFAULT 5060,
 		created_by  INTEGER,
+		owning_org_id INTEGER NOT NULL DEFAULT 0,
 		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`)
 	if err != nil {
 		t.Fatalf("create sip_accounts table: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE organizations (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			name       VARCHAR(255) NOT NULL,
+			cluster_id INTEGER,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE cross_org_access_log (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor_uid     INTEGER NOT NULL,
+			actor_org_id  INTEGER NOT NULL,
+			target_uid    INTEGER NOT NULL,
+			target_org_id INTEGER NOT NULL,
+			action        VARCHAR(64) NOT NULL,
+			created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		t.Fatalf("create organizations/cross_org_access_log schema: %v", err)
 	}
 	return db
 }
@@ -49,6 +70,26 @@ func sipAccountsSignToken(t *testing.T, keys *jwt.Keys, localUID int, perms ...s
 	claims := map[string]any{
 		"sub":       "local:1",
 		"local_uid": localUID,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if len(perms) > 0 {
+		claims["permissions"] = perms
+	}
+	tok, err := jwt.Sign(keys, claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return tok
+}
+
+// sipAccountsClusterToken -- CP-HIPAA-3: same as sipAccountsSignToken but also carries a real
+// org_id claim.
+func sipAccountsClusterToken(t *testing.T, keys *jwt.Keys, localUID, orgID int, perms ...string) string {
+	t.Helper()
+	claims := map[string]any{
+		"sub":       "local:" + strconv.Itoa(localUID),
+		"local_uid": localUID,
+		"org_id":    orgID,
 		"exp":       time.Now().Add(time.Hour).Unix(),
 	}
 	if len(perms) > 0 {
@@ -350,6 +391,7 @@ func newTestSipAccountsDBWithMailCreds(t *testing.T) *sql.DB {
 		email        VARCHAR(255) NOT NULL,
 		password_enc TEXT     NOT NULL,
 		created_by   INTEGER,
+		owning_org_id INTEGER NOT NULL DEFAULT 0,
 		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`); err != nil {
@@ -437,7 +479,52 @@ func TestSipAccounts_RemoveScopedToOwnCreations(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+providerToken)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 removing a SIP account created by a different provider, got %d: %s", rr.Code, rr.Body.String())
+	// CP-HIPAA-3: remove() now checks the real relationship (own creation, or a shared cluster)
+	// UP FRONT via callerProvisionsParticipant -- same helper upsert already uses -- and returns
+	// a real, explicit 403 for "not yours to touch" rather than a 404 that could also mean
+	// "doesn't exist." Neither org here has a cluster configured, so this is correctly denied.
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 removing a SIP account created by an unrelated provider, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// CP-HIPAA-3: "the admins from that collective should be able to administer participants from
+// that cluster of providers." A SIP account provisioned by org 1 must be manageable by a
+// provider from org 2, when both share a real, configured cluster.
+func TestSipAccounts_ClusterMateCanProvisionAndList(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDBWithMailCreds(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	if _, err := db.Exec(`INSERT INTO organizations (id, name, cluster_id) VALUES (1, 'Health Clinic', 100), (2, 'Shelter', 100)`); err != nil {
+		t.Fatalf("seed orgs: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, owning_org_id) VALUES (100, 'p@example.test', 'enc', 10, 1)`); err != nil {
+		t.Fatalf("seed mail credential: %v", err)
+	}
+
+	clusterMateToken := sipAccountsClusterToken(t, keys, 20, 2, "sip-accounts.provision")
+	body, _ := json.Marshal(map[string]any{"extension": "3000", "sip_server": "198.58.107.85", "sip_port": 5060})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/100", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+clusterMateToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 -- a cluster-mate should be able to provision SIP for org 1's own participant, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts", nil)
+	listReq.Header.Set("Authorization", "Bearer "+clusterMateToken)
+	listRR := httptest.NewRecorder()
+	h.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, body = %s", listRR.Code, listRR.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(listRR.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 SIP account visible to the cluster-mate, got %d: %+v", len(got), got)
 	}
 }

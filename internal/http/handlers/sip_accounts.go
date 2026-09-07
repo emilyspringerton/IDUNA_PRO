@@ -354,23 +354,26 @@ func (h *SipAccountsHandler) getMineWebphoneCredentials(w http.ResponseWriter, r
 }
 
 func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
-	// CP-HIPAA-2 minimum-necessary scoping: a provider-only caller (no users.admin) sees only
-	// the SIP accounts THEY created -- same real principle mail_accounts.go's own list already
-	// enforces.
-	query := `SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts`
-	args := []any{}
-	if !hasPermission(r, "users.admin") {
-		callerUID := callerLocalUID(r)
+	// CP-HIPAA-2/CP-HIPAA-3 minimum-necessary scoping: a provider-only caller (no users.admin)
+	// sees the SIP accounts THEY created, OR any SIP account whose owning organization shares a
+	// trusted cluster with their own -- same real principle mail_accounts.go's own list already
+	// enforces. Fetches every row and filters in Go (this table is small, real, bounded
+	// per-deployment data, not a scale concern) rather than a second, harder-to-read SQL query
+	// per caller tier.
+	isAdmin := hasPermission(r, "users.admin")
+	var callerUID *int
+	callerOrg := 0
+	if !isAdmin {
+		callerUID = callerLocalUID(r)
 		if callerUID == nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		query += ` WHERE created_by = ?`
-		args = append(args, *callerUID)
+		callerOrg = callerOrgID(r)
 	}
-	query += ` ORDER BY local_uid`
 
-	rows, err := h.DB.QueryContext(r.Context(), query, args...)
+	rows, err := h.DB.QueryContext(r.Context(),
+		`SELECT local_uid, extension, sip_server, sip_port, updated_at, created_by, owning_org_id FROM sip_accounts ORDER BY local_uid`)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -379,9 +382,18 @@ func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 	out := []sipAccount{}
 	for rows.Next() {
 		var a sipAccount
-		if err := rows.Scan(&a.LocalUID, &a.Extension, &a.SipServer, &a.SipPort, &a.UpdatedAt); err != nil {
+		var createdBy sql.NullInt64
+		var owningOrgID int
+		if err := rows.Scan(&a.LocalUID, &a.Extension, &a.SipServer, &a.SipPort, &a.UpdatedAt, &createdBy, &owningOrgID); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if !isAdmin {
+			ownCreation := createdBy.Valid && callerUID != nil && int(createdBy.Int64) == *callerUID
+			clusterMate := orgsShareCluster(r.Context(), h.DB, callerOrg, owningOrgID)
+			if !ownCreation && !clusterMate {
+				continue
+			}
 		}
 		out = append(out, a)
 	}
@@ -411,26 +423,33 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 	}
 
 	callerUID := operatorUIDFromContext(r)
+	callerOrg := callerOrgID(r)
 	if !hasPermission(r, "users.admin") {
-		// CP-HIPAA-2: a provider-only caller may only upsert a SIP extension for a participant
-		// they already provision -- either an existing SIP account they created, or a mailbox
-		// they created (mail_account_credentials.created_by). Never an arbitrary uid.
-		if !h.callerProvisionsParticipant(r, callerUID, uid) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: you may only provision SIP for a participant you already manage"})
+		// CP-HIPAA-2/CP-HIPAA-3: a provider-only caller may only upsert a SIP extension for a
+		// participant they already provision -- either an existing SIP account or mailbox they
+		// created, or one whose owning organization shares a trusted cluster with their own
+		// ("the admins from that collective should be able to administer participants from that
+		// cluster of providers"). Never a genuinely unrelated uid.
+		if !h.callerProvisionsParticipant(r, callerUID, callerOrg, uid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: you may only provision SIP for a participant you already manage or a cluster-mate's participant"})
 			return
 		}
 	}
 
 	now := time.Now().UTC()
+	// owning_org_id is only ever set on the FIRST insert (ON CONFLICT never touches it, same
+	// "snapshot at creation, never live-updated" idiom mail_account_credentials.owning_org_id
+	// already establishes) -- a cluster-mate updating an existing extension must not silently
+	// reassign its owning organization to their own.
 	_, err := h.DB.ExecContext(r.Context(), `
-		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by, owning_org_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			extension = excluded.extension,
 			sip_server = excluded.sip_server,
 			sip_port = excluded.sip_port,
 			updated_at = excluded.updated_at
-	`, uid, req.Extension, req.SipServer, req.SipPort, callerUID, now)
+	`, uid, req.Extension, req.SipServer, req.SipPort, callerUID, callerOrg, now)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -444,10 +463,12 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 	writeJSON(w, http.StatusOK, acct)
 }
 
-// callerProvisionsParticipant -- CP-HIPAA-2: true if callerUID already provisions uid's mailbox
-// or SIP account (i.e. this participant is genuinely "theirs"), false otherwise. A provider-only
-// caller with no existing relationship to uid can't bootstrap one via SIP upsert.
-func (h *SipAccountsHandler) callerProvisionsParticipant(r *http.Request, callerUID, uid int) bool {
+// callerProvisionsParticipant -- CP-HIPAA-2/CP-HIPAA-3: true if callerUID already provisions
+// uid's mailbox or SIP account (this participant is genuinely "theirs"), OR if uid's mailbox/SIP
+// account has an owning organization that shares a trusted cluster with callerOrg (a real
+// cluster-mate relationship). False otherwise -- a provider-only caller with neither relationship
+// can't bootstrap one via SIP upsert.
+func (h *SipAccountsHandler) callerProvisionsParticipant(r *http.Request, callerUID, callerOrg, uid int) bool {
 	var count int
 	if err := h.DB.QueryRowContext(r.Context(),
 		`SELECT COUNT(*) FROM sip_accounts WHERE local_uid = ? AND created_by = ?`, uid, callerUID,
@@ -459,23 +480,34 @@ func (h *SipAccountsHandler) callerProvisionsParticipant(r *http.Request, caller
 	).Scan(&count); err == nil && count > 0 {
 		return true
 	}
+	var sipOrg, mailOrg sql.NullInt64
+	_ = h.DB.QueryRowContext(r.Context(), `SELECT owning_org_id FROM sip_accounts WHERE local_uid = ?`, uid).Scan(&sipOrg)
+	if sipOrg.Valid && orgsShareCluster(r.Context(), h.DB, callerOrg, int(sipOrg.Int64)) {
+		return true
+	}
+	_ = h.DB.QueryRowContext(r.Context(), `SELECT owning_org_id FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&mailOrg)
+	if mailOrg.Valid && orgsShareCluster(r.Context(), h.DB, callerOrg, int(mailOrg.Int64)) {
+		return true
+	}
 	return false
 }
 
 func (h *SipAccountsHandler) remove(w http.ResponseWriter, r *http.Request, uid int) {
-	query := `DELETE FROM sip_accounts WHERE local_uid = ?`
-	args := []any{uid}
 	if !hasPermission(r, "users.admin") {
-		// CP-HIPAA-2: a provider-only caller can only remove a SIP account THEY created.
+		// CP-HIPAA-2/CP-HIPAA-3: a provider-only caller can remove a SIP account they created,
+		// or a cluster-mate's -- same relationship callerProvisionsParticipant already checks
+		// for upsert, reused here rather than a third, separately-maintained scoping query.
 		callerUID := callerLocalUID(r)
 		if callerUID == nil {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		query += ` AND created_by = ?`
-		args = append(args, *callerUID)
+		if !h.callerProvisionsParticipant(r, *callerUID, callerOrgID(r), uid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
 	}
-	res, err := h.DB.ExecContext(r.Context(), query, args...)
+	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM sip_accounts WHERE local_uid = ?`, uid)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

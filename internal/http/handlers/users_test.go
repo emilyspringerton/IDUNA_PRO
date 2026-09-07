@@ -3,10 +3,15 @@ package handlers_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
 
 	"idunapro/internal/auth/jwt"
 	"idunapro/internal/http/handlers"
@@ -263,5 +268,164 @@ func TestUsersHandler_ProviderAdminCanOnlyToggleProviderRole(t *testing.T) {
 	rr2 := patchUser(t, h, token, 7, map[string]any{"status": "suspended"})
 	if rr2.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 -- a Provider Admin must not be able to change status, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+}
+
+// CP-HIPAA-3: "there may be a several organizations who have service agreements with each
+// other... the admins from that collective should be able to administer participants from that
+// cluster of providers." Real worked example: a health care provider (org 1) onboards a
+// participant; a service navigator at a shelter (org 2, sharing org 1's own real cluster) needs
+// to reset that participant's password to do real housing-navigation work.
+
+func newClusterTestHandler(t *testing.T, keys *jwt.Keys, seed map[int]*userlog.LocalUser) (http.Handler, *sql.DB) {
+	t.Helper()
+	eventLog, err := userlog.NewFileEventLog(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileEventLog: %v", err)
+	}
+	t.Cleanup(func() { _ = eventLog.Close() })
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if _, err := db.Exec(`
+		CREATE TABLE organizations (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			name       VARCHAR(255) NOT NULL,
+			cluster_id INTEGER,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE cross_org_access_log (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor_uid     INTEGER NOT NULL,
+			actor_org_id  INTEGER NOT NULL,
+			target_uid    INTEGER NOT NULL,
+			target_org_id INTEGER NOT NULL,
+			action        VARCHAR(64) NOT NULL,
+			created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+	`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	proj := &fakeUserProjector{byUID: seed}
+	h := &handlers.UsersHandler{Log: eventLog, Proj: proj, DB: db}
+	return middleware.RequireAuth(keys)(h), db
+}
+
+func clusterToken(t *testing.T, keys *jwt.Keys, localUID, orgID int, perms ...string) string {
+	t.Helper()
+	claims := map[string]any{
+		"sub":       "local:" + strconv.Itoa(localUID),
+		"local_uid": localUID,
+		"org_id":    orgID,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if len(perms) > 0 {
+		claims["permissions"] = perms
+	}
+	tok, err := jwt.Sign(keys, claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return tok
+}
+
+func TestUsersHandler_ProviderCanResetPasswordForParticipantInSameCluster(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	// uid 7: a participant onboarded by org 1 (a health care provider).
+	seed := map[int]*userlog.LocalUser{
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+	}
+	h, db := newClusterTestHandler(t, keys, seed)
+	if _, err := db.Exec(`INSERT INTO organizations (id, name, cluster_id) VALUES (1, 'Health Clinic', 100), (2, 'Downtown Shelter', 100)`); err != nil {
+		t.Fatalf("seed orgs: %v", err)
+	}
+
+	// uid 10: a service navigator at org 2 (the shelter) -- a DIFFERENT org, sharing cluster 100.
+	token := clusterToken(t, keys, 10, 2, "mail-accounts.provision")
+
+	rr := patchUser(t, h, token, 7, map[string]any{"password": "a-real-new-password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 -- a cluster-mate provider should be able to reset the participant's password, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM cross_org_access_log WHERE actor_uid = 10 AND target_uid = 7 AND action = 'password_reset'`).Scan(&count); err != nil {
+		t.Fatalf("query cross_org_access_log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly 1 cross_org_access_log row for this cross-org password reset, got %d", count)
+	}
+}
+
+func TestUsersHandler_ProviderCannotResetPasswordOutsideCluster(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+	}
+	h, db := newClusterTestHandler(t, keys, seed)
+	// org 1 and org 3 do NOT share a cluster (org 3 has no cluster_id at all).
+	if _, err := db.Exec(`INSERT INTO organizations (id, name, cluster_id) VALUES (1, 'Health Clinic', 100), (3, 'Unrelated Agency', NULL)`); err != nil {
+		t.Fatalf("seed orgs: %v", err)
+	}
+
+	token := clusterToken(t, keys, 11, 3, "mail-accounts.provision")
+	rr := patchUser(t, h, token, 7, map[string]any{"password": "a-real-new-password"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- an unrelated organization must not be able to reset this participant's password, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM cross_org_access_log`).Scan(&count); err != nil {
+		t.Fatalf("query cross_org_access_log: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no cross_org_access_log row for a denied attempt, got %d", count)
+	}
+}
+
+func TestUsersHandler_SameOrgPasswordResetIsNotLoggedAsCrossOrg(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+	}
+	h, db := newClusterTestHandler(t, keys, seed)
+	if _, err := db.Exec(`INSERT INTO organizations (id, name) VALUES (1, 'Health Clinic')`); err != nil {
+		t.Fatalf("seed orgs: %v", err)
+	}
+
+	// Same org as the participant -- no cluster configuration needed at all, same real org.
+	token := clusterToken(t, keys, 12, 1, "mail-accounts.provision")
+	rr := patchUser(t, h, token, 7, map[string]any{"password": "a-real-new-password"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 -- a provider resetting their own org's participant, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM cross_org_access_log`).Scan(&count); err != nil {
+		t.Fatalf("query cross_org_access_log: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no cross_org_access_log row for a same-org action, got %d", count)
+	}
+}
+
+func TestUsersHandler_UnassignedOrgNeverSharesCluster(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	// Participant has no org assigned at all (org_id 0, the pre-CP-HIPAA-3 default).
+	seed := map[int]*userlog.LocalUser{
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 0},
+	}
+	h, _ := newClusterTestHandler(t, keys, seed)
+
+	// Caller also has no org assigned (org_id 0) -- must NOT trivially "share" with the
+	// participant just because both are zero.
+	token := clusterToken(t, keys, 13, 0, "mail-accounts.provision")
+	rr := patchUser(t, h, token, 7, map[string]any{"password": "a-real-new-password"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- two unassigned (org_id 0) accounts must never be treated as sharing a cluster, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

@@ -30,9 +30,9 @@ func (p *MySQLProjector) Apply(ctx context.Context, rec Record) error {
 		now := rec.AppendedAt.UTC().Format("2006-01-02 15:04:05")
 		_, err := p.db.ExecContext(ctx,
 			`INSERT IGNORE INTO local_users
-			 (local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'active', 0, 0, 0, 0, ?, ?)`,
-			d.LocalUID, d.Email, d.DisplayName, d.PasswordHash, now, now,
+			 (local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'active', 0, 0, 0, 0, ?, ?, ?)`,
+			d.LocalUID, d.Email, d.DisplayName, d.PasswordHash, d.OrgID, now, now,
 		)
 		return err
 
@@ -132,6 +132,18 @@ func (p *MySQLProjector) Apply(ctx context.Context, rec Record) error {
 		)
 		return err
 
+	case EventUserOrgChanged:
+		var d UserOrgChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return fmt.Errorf("mysql projector apply org_changed: %w", err)
+		}
+		now := rec.AppendedAt.UTC().Format("2006-01-02 15:04:05")
+		_, err := p.db.ExecContext(ctx,
+			`UPDATE local_users SET org_id=?, updated_at=? WHERE local_uid=?`,
+			d.OrgID, now, d.LocalUID,
+		)
+		return err
+
 	case EventUserDeleted:
 		var d UserDeletedData
 		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
@@ -168,7 +180,7 @@ func (p *MySQLProjector) AdvanceCursor(ctx context.Context, seq uint64) error {
 
 func (p *MySQLProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
 		 FROM local_users WHERE local_uid=? AND status != 'deleted'`,
 		uid,
 	))
@@ -176,14 +188,14 @@ func (p *MySQLProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, err
 
 func (p *MySQLProjector) GetByEmail(ctx context.Context, email string) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
 		 FROM local_users WHERE email=? AND status != 'deleted'`,
 		email,
 	))
 }
 
 func (p *MySQLProjector) ListUsers(ctx context.Context, limit int) ([]LocalUser, error) {
-	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, created_at, updated_at
+	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
 	      FROM local_users WHERE status != 'deleted' ORDER BY local_uid ASC`
 	var rows *sql.Rows
 	var err error
@@ -226,7 +238,7 @@ func (p *MySQLProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	var createdStr, updatedStr string
 	err := row.Scan(
 		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
-		&isOperatorAdmin, &isProviderAdmin, &createdStr, &updatedStr,
+		&isOperatorAdmin, &isProviderAdmin, &u.OrgID, &createdStr, &updatedStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -253,7 +265,7 @@ func (p *MySQLProjector) scanRows(rows *sql.Rows) ([]LocalUser, error) {
 		var createdStr, updatedStr string
 		if err := rows.Scan(
 			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
-			&isOperatorAdmin, &isProviderAdmin, &createdStr, &updatedStr,
+			&isOperatorAdmin, &isProviderAdmin, &u.OrgID, &createdStr, &updatedStr,
 		); err != nil {
 			return nil, err
 		}

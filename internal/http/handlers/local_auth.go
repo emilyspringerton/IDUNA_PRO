@@ -87,9 +87,13 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"email":        user.Email,
 		"display_name": user.DisplayName,
 		"permissions":  localUserPermissions(user),
-		"iss":          issuer,
-		"aud":          "farthq-ecosystem",
-		"exp":          exp.Unix(),
+		// org_id -- CP-HIPAA-3: baked into the JWT at login (same "cheap to read on every
+		// request" convention local_uid/permissions already establish) so handlers never need a
+		// DB round-trip just to know the caller's own organization for cluster-scoping checks.
+		"org_id": user.OrgID,
+		"iss":    issuer,
+		"aud":    "farthq-ecosystem",
+		"exp":    exp.Unix(),
 	}
 	token, err := authjwt.Sign(h.Keys, claims)
 	if err != nil {

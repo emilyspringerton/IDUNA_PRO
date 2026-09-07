@@ -1,0 +1,14 @@
+-- CP-HIPAA-3: which organization a local_users identity belongs to. Dual real meaning by role,
+-- same field either way: for a Provider/Provider Admin/Operator Admin/Top Admin, this is the
+-- organization THEY work for; for a participant, this is the organization that onboarded them
+-- (stamped automatically from the creating provider's own org_id at account-creation time --
+-- see users.go's own createUser -- "batteries included happy path": a provider never picks an
+-- org by hand, it's inherited).
+--
+-- 0 (the default, matching every other real DB-backed role flag in this table -- is_admin,
+-- is_provider, etc.) means "no organization assigned" -- real, existing accounts created before
+-- this column existed all default here, and correctly get ZERO new cross-org access as a result
+-- (org_id 0 never "shares a cluster" with anything, including another account also at 0 -- see
+-- orgsShareCluster's own doc comment in users.go). This is a deliberate, safe, backward-
+-- compatible default: nothing changes for a deployment that never creates an organization.
+ALTER TABLE local_users ADD COLUMN org_id INTEGER NOT NULL DEFAULT 0;

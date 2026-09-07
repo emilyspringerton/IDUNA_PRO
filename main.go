@@ -163,7 +163,7 @@ func main() {
 	healthH := &handlers.HealthHandler{}
 	applesH := &handlers.ApplesHandler{Store: iamStore, ApplesGitDir: os.Getenv("APPLES_GIT_DIR"), EventLog: unifiedLog}
 	agentsH := &handlers.AgentsHandler{Store: iamStore}
-	usersH := &handlers.UsersHandler{Log: uel, Proj: userProj}
+	usersH := &handlers.UsersHandler{Log: uel, Proj: userProj, DB: db}
 	gdprH := &handlers.GDPRHandler{
 		Deps:      gdpr.Deps{DB: db, Log: uel, Proj: userProj},
 		ExportDir: filepath.Join(root, "var", "gdpr-exports"),
@@ -326,6 +326,11 @@ func main() {
 
 	gdprProtected := middleware.RequireAuth(keys)(gdprH)
 	mux.Handle("/api/v1/gdpr/", gdprProtected)
+
+	orgsH := &handlers.OrganizationsHandler{DB: db}
+	orgsProtected := middleware.RequireAuth(keys)(orgsH)
+	mux.Handle("/api/v1/organizations", orgsProtected)
+	mux.Handle("/api/v1/organizations/", orgsProtected)
 
 	// CP-SIP-1244543543 -- sip-accounts mixes a self-read route (/me) with users.admin-gated
 	// admin routes inside the one handler, same real shape usersH's own getUser/updateUser

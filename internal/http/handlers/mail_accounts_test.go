@@ -39,8 +39,24 @@ func newTestMailAccountsHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sq
 			email        VARCHAR(255) NOT NULL,
 			password_enc TEXT     NOT NULL,
 			created_by   INTEGER,
+			owning_org_id INTEGER NOT NULL DEFAULT 0,
 			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE organizations (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			name       VARCHAR(255) NOT NULL,
+			cluster_id INTEGER,
+			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE cross_org_access_log (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			actor_uid     INTEGER NOT NULL,
+			actor_org_id  INTEGER NOT NULL,
+			target_uid    INTEGER NOT NULL,
+			target_org_id INTEGER NOT NULL,
+			action        VARCHAR(64) NOT NULL,
+			created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
 	`); err != nil {
 		t.Fatalf("create schema: %v", err)
@@ -61,6 +77,26 @@ func mailAccountsToken(t *testing.T, keys *jwt.Keys, localUID int, perms ...stri
 	claims := map[string]any{
 		"sub":       "local:" + strconv.Itoa(localUID),
 		"local_uid": localUID,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if len(perms) > 0 {
+		claims["permissions"] = perms
+	}
+	tok, err := jwt.Sign(keys, claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return tok
+}
+
+// mailAccountsClusterToken -- CP-HIPAA-3: same as mailAccountsToken but also carries a real
+// org_id claim, for the cluster-trust tests below.
+func mailAccountsClusterToken(t *testing.T, keys *jwt.Keys, localUID, orgID int, perms ...string) string {
+	t.Helper()
+	claims := map[string]any{
+		"sub":       "local:" + strconv.Itoa(localUID),
+		"local_uid": localUID,
+		"org_id":    orgID,
 		"exp":       time.Now().Add(time.Hour).Unix(),
 	}
 	if len(perms) > 0 {
@@ -145,5 +181,48 @@ func TestMailAccountsHandler_RevealPassword_ScopedToCreator(t *testing.T) {
 	h.ServeHTTP(rrAdmin, admin)
 	if rrAdmin.Code == http.StatusForbidden {
 		t.Fatalf("users.admin should be able to reveal any mailbox, got 403: %s", rrAdmin.Body.String())
+	}
+}
+
+// CP-HIPAA-3: "the admins from that collective should be able to administer participants from
+// that cluster of providers." A mailbox provisioned by org 1 must be visible/revealable to a
+// provider from org 2, when both share a real, configured cluster -- and NOT to a provider from
+// an unrelated org 3, and every cross-org reveal must leave a real cross_org_access_log row.
+
+func TestMailAccountsHandler_ClusterMateCanRevealAndListAcrossOrgs(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	h, db := newTestMailAccountsHandler(t, keys)
+
+	if _, err := db.Exec(`INSERT INTO organizations (id, name, cluster_id) VALUES (1, 'Health Clinic', 100), (2, 'Shelter', 100), (3, 'Unrelated', NULL)`); err != nil {
+		t.Fatalf("seed orgs: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, owning_org_id) VALUES (100, 'p1@example.test', 'enc1', 10, 1)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	clusterMateToken := mailAccountsClusterToken(t, keys, 20, 2, "mail-accounts.provision")
+	rr := httptest.NewRequest(http.MethodGet, "/api/v1/mail-accounts/100/reveal-password", nil)
+	rr.Header.Set("Authorization", "Bearer "+clusterMateToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rr)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("expected a cluster-mate (org 2, shares cluster 100 with org 1) to be allowed, got 403: %s", rec.Body.String())
+	}
+
+	var logCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM cross_org_access_log WHERE actor_uid = 20 AND target_uid = 100 AND action = 'reveal_mail_password'`).Scan(&logCount); err != nil {
+		t.Fatalf("query cross_org_access_log: %v", err)
+	}
+	if logCount != 1 {
+		t.Fatalf("expected exactly 1 cross_org_access_log row for this cross-org reveal, got %d", logCount)
+	}
+
+	unrelatedToken := mailAccountsClusterToken(t, keys, 30, 3, "mail-accounts.provision")
+	rr2 := httptest.NewRequest(http.MethodGet, "/api/v1/mail-accounts/100/reveal-password", nil)
+	rr2.Header.Set("Authorization", "Bearer "+unrelatedToken)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, rr2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an org with no shared cluster, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }

@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -27,6 +29,12 @@ import (
 type UsersHandler struct {
 	Log  userlog.EventLog
 	Proj userlog.UserProjector
+	// DB -- CP-HIPAA-3: real, direct SQL access for the organizations/cluster-trust lookup
+	// (orgsShareCluster) and the cross_org_access_log audit insert (logCrossOrgAccess). Nil-safe:
+	// with no DB wired, orgsShareCluster always fails closed (no cluster-based access at all),
+	// same "feature unavailable, not a panic" convention MailAccountsHandler.CredentialsKey
+	// already establishes.
+	DB *sql.DB
 }
 
 // ── wire helpers ─────────────────────────────────────────────────────────────
@@ -72,12 +80,15 @@ func (h *UsersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.getUser(w, r, uid)
 	case http.MethodPatch:
-		// CP-HIPAA-2: a Provider Admin (providers.manage) can also reach this route -- the real,
-		// necessary way they grant/revoke the Provider Operator role on someone else. updateUser
-		// itself enforces which FIELDS a providers.manage-only caller (no users.admin) may touch
-		// (is_provider only) and which TARGETS anyone below Top Admin may touch (never another
-		// admin-tier account) -- see its own tier-guard logic.
-		if hasPermission(r, "users.admin") || hasPermission(r, "providers.manage") {
+		// CP-HIPAA-2/CP-HIPAA-3: a Provider Admin (providers.manage) or a plain Provider Operator
+		// (mail-accounts.provision) can also reach this route -- a Provider Admin's real,
+		// necessary way to grant/revoke the Provider Operator role on someone else, and a
+		// Provider Operator's real, necessary way to reset a participant's password within a
+		// shared trusted cluster ("the service navigator at the shelter... needs to be able to
+		// password reset that participant"). updateUser itself enforces which FIELDS a
+		// provider-tier caller (no users.admin) may touch and which TARGETS anyone below Top
+		// Admin may touch (never another admin-tier account) -- see its own tier-guard logic.
+		if hasPermission(r, "users.admin") || hasPermission(r, "providers.manage") || hasPermission(r, "mail-accounts.provision") {
 			h.updateUser(w, r, uid)
 		} else {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
@@ -134,11 +145,17 @@ func (h *UsersHandler) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	operatorUID := operatorUIDFromContext(r)
+	// CP-HIPAA-3 "batteries included happy path": the new participant's own OrgID is stamped
+	// automatically from the creating provider's own org_id JWT claim -- the provider never
+	// picks an organization by hand, it's inherited from whoever's actually onboarding this
+	// person. A caller with no org_id (0, the default) produces a participant with no org_id
+	// either -- correctly opts them out of any cluster-wide access until an admin assigns one.
 	payload, _ := json.Marshal(userlog.UserCreatedData{
 		LocalUID:     nextUID,
 		Email:        req.Email,
 		DisplayName:  req.DisplayName,
 		PasswordHash: string(hash),
+		OrgID:        callerOrgID(r),
 	})
 	ev := userlog.Event{
 		ID:          uuid.New().String(),
@@ -226,6 +243,12 @@ type updateUserRequest struct {
 	// (like IsAdmin) requires admins.manage (Top Admin only) -- see updateUser's tier guard.
 	IsOperatorAdmin *bool `json:"is_operator_admin,omitempty"`
 	IsProviderAdmin *bool `json:"is_provider_admin,omitempty"`
+	// OrgID -- CP-HIPAA-3: (re)assigns which organization this user belongs to (provider) or was
+	// onboarded by (participant). users.admin-gated, same tier as ordinary user management (NOT
+	// admins.manage-gated -- this doesn't grant any elevated PERMISSION tier, only changes
+	// cluster-trust SCOPE, a real, deliberate distinction from is_admin/is_operator_admin/
+	// is_provider_admin above).
+	OrgID *int `json:"org_id,omitempty"`
 }
 
 func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid int) {
@@ -247,11 +270,13 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		return
 	}
 
-	// CP-HIPAA-2 tier guard. Real, load-bearing access-control logic -- see localUserPermissions'
-	// own doc comment for the full 4-tier model this enforces.
+	// CP-HIPAA-2/CP-HIPAA-3 tier guard. Real, load-bearing access-control logic -- see
+	// localUserPermissions' own doc comment for the full 4-tier model, and orgsShareCluster's
+	// own doc comment for the cluster-trust model this also enforces.
 	isTopAdmin := hasPermission(r, "admins.manage")
 	isUsersAdmin := hasPermission(r, "users.admin") // true for both Top and Operator Admin
 	isProviderAdmin := hasPermission(r, "providers.manage")
+	isProviderTier := hasPermission(r, "mail-accounts.provision") // Provider Operator OR Provider Admin
 
 	targetIsAdminTier := existing.LocalUID == 0 || existing.IsAdmin || existing.IsOperatorAdmin
 	if targetIsAdminTier && !isTopAdmin {
@@ -271,12 +296,45 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		return
 	}
 
-	// A Provider-Admin-only caller (providers.manage but not users.admin) may ONLY grant/revoke
-	// the Provider Operator role -- every other field here (email, password, status, and the
-	// admin-tier fields already checked above) is out of scope for that tier.
-	if isProviderAdmin && !isUsersAdmin {
-		if req.Email != nil || req.DisplayName != nil || req.Password != nil || req.Status != nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: a provider admin may only grant or revoke the provider role"})
+	// OrgID reassignment is users.admin-gated (Top or Operator Admin), not a provider action --
+	// changing which org someone belongs to is real, internal platform-operator bookkeeping.
+	if req.OrgID != nil && !isUsersAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only an admin can reassign a user's organization"})
+		return
+	}
+
+	// CP-HIPAA-3: the real worked example this section exists for -- "the service navigator at
+	// the shelter that participant stays at needs to be able to password reset that
+	// participant... we will assume the provider cluster is a trusted network for now." A
+	// provider-tier caller (Operator OR Admin, not just providers.manage) may reset a
+	// participant's PASSWORD -- and ONLY the password, nothing else -- when their own
+	// organization shares a cluster with the participant's own owning organization. isCrossOrg
+	// is computed once here (used both to gate the request and to decide whether this specific
+	// action needs a real cross_org_access_log row below).
+	isCrossOrgPasswordReset := false
+	if (isProviderTier || isProviderAdmin) && !isUsersAdmin && req.Password != nil {
+		callerOrg := callerOrgID(r)
+		if !orgsShareCluster(r.Context(), h.DB, callerOrg, existing.OrgID) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: password reset requires the same organization or a shared trusted cluster"})
+			return
+		}
+		isCrossOrgPasswordReset = callerOrg != existing.OrgID
+	}
+
+	// A provider-tier caller (Operator OR Admin, providers.manage and/or mail-accounts.provision
+	// -- checked independently since a hand-crafted token may legitimately carry only one) may
+	// touch AT MOST: is_provider (Provider Admin only, providers.manage) and password (both
+	// tiers, cluster-gated above) -- every other field here (email, display_name, status,
+	// org_id, and the admin-tier fields already checked above) stays out of scope for this tier,
+	// a deliberate, narrow first slice ("it doesn't need to be totally granular yet... but
+	// building towards that").
+	if (isProviderTier || isProviderAdmin) && !isUsersAdmin {
+		if req.Email != nil || req.DisplayName != nil || req.Status != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: a provider may only reset a participant's password or (Provider Admin only) grant/revoke the provider role"})
+			return
+		}
+		if req.IsProvider != nil && !isProviderAdmin {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only a provider admin may grant or revoke the provider role"})
 			return
 		}
 	}
@@ -338,6 +396,16 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		}
 		_ = h.Proj.Apply(ctx, recs[0])
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+
+		// CP-HIPAA-3: "we need intense logging to ensure against fraud waste and abuse." A real,
+		// dedicated audit row for exactly the sensitive case the cluster-trust model creates --
+		// an actor from a DIFFERENT organization than the participant's own resetting their
+		// password, only possible because both organizations share a cluster. A same-org reset
+		// (the common case -- a provider resetting their own participant) is not logged here,
+		// same reasoning cross_org_access_log's own migration comment gives.
+		if isCrossOrgPasswordReset {
+			logCrossOrgAccess(ctx, h.DB, operatorUID, callerOrgID(r), uid, existing.OrgID, "password_reset")
+		}
 	}
 
 	// Status change.
@@ -465,6 +533,29 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
 	}
 
+	// Organization (re)assignment (CP-HIPAA-3). users.admin-gated -- already enforced above.
+	if req.OrgID != nil {
+		payload, _ := json.Marshal(userlog.UserOrgChangedData{
+			LocalUID: uid,
+			OrgID:    *req.OrgID,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserOrgChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
 	updated, _ := h.Proj.GetByUID(ctx, uid)
 	if updated == nil {
 		updated = existing
@@ -526,6 +617,7 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		"is_operator_admin": u.IsOperatorAdmin,
 		"is_provider":       u.IsProvider,
 		"is_provider_admin": u.IsProviderAdmin,
+		"org_id":            u.OrgID,
 		"created_at":        u.CreatedAt.Format(time.RFC3339),
 		"updated_at":        u.UpdatedAt.Format(time.RFC3339),
 	}
@@ -588,4 +680,79 @@ func callerLocalUID(r *http.Request) *int {
 func callerIsUID0(r *http.Request) bool {
 	uid := callerLocalUID(r)
 	return uid != nil && *uid == 0
+}
+
+// callerOrgID -- CP-HIPAA-3: extracts org_id from the JWT claims (baked in at login, see
+// LocalAuthHandler's own claims map), 0 if absent -- 0 is the same "no organization assigned"
+// sentinel LocalUser.OrgID's own doc comment establishes.
+func callerOrgID(r *http.Request) int {
+	claims := middleware.ClaimsFromContext(r.Context())
+	if claims == nil {
+		return 0
+	}
+	if v, ok := claims["org_id"]; ok {
+		switch t := v.(type) {
+		case float64:
+			return int(t)
+		case int:
+			return t
+		}
+	}
+	return 0
+}
+
+// orgsShareCluster -- CP-HIPAA-3 (founder real-time: "there may be a several organizations who
+// have service agreements with each other... the admins from that collective should be able to
+// administer participants from that cluster of providers... we will assume the provider cluster
+// is a trusted network for now until we bring the service to multiple markets"). Real, load-
+// bearing cluster-trust check: two organizations "share a cluster" if they're the literal same
+// real organization, OR both carry the same real, non-null organizations.cluster_id.
+//
+// org 0 (unassigned) NEVER shares with anything, including another 0 -- a real, deliberate,
+// safe-by-default rule: without this, every account created before organizations existed (every
+// real account in this codebase as of this migration) would trivially "share" with every other
+// unassigned account, silently granting brand-new cross-account access nobody asked for. Nil DB
+// fails closed the same way (no cluster-based access at all without real org data to check
+// against) -- same "feature unavailable, not a panic" convention this file's own DB field doc
+// comment already establishes.
+//
+// Deliberately a bare int comparison, not a many-to-many join table -- "we will assume the
+// provider cluster is a trusted network for now" reads as one flat trust boundary per real
+// deployment/market today. A genuine org_cluster_membership table with per-relationship
+// permissions is the real, later "zero-ish trust" granularity step the founder's own message
+// explicitly named as a future direction, not built here.
+func orgsShareCluster(ctx context.Context, db *sql.DB, orgA, orgB int) bool {
+	if orgA == 0 || orgB == 0 {
+		return false
+	}
+	if orgA == orgB {
+		return true
+	}
+	if db == nil {
+		return false
+	}
+	var clusterA, clusterB sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT cluster_id FROM organizations WHERE id = ?`, orgA).Scan(&clusterA); err != nil {
+		return false
+	}
+	if err := db.QueryRowContext(ctx, `SELECT cluster_id FROM organizations WHERE id = ?`, orgB).Scan(&clusterB); err != nil {
+		return false
+	}
+	return clusterA.Valid && clusterB.Valid && clusterA.Int64 == clusterB.Int64
+}
+
+// logCrossOrgAccess -- CP-HIPAA-3 (founder real-time: "we need intense logging to ensure against
+// fraud waste and abuse"). Real, direct insert into the dedicated cross_org_access_log table
+// (see its own migration comment for why this is a real SQL table, not a generic event). Best-
+// effort: a logging failure must never block the real action it's recording (same "audit the
+// real thing that happened, don't let the audit trail become a new outage vector" reasoning
+// every other fire-and-forget log call in this codebase already follows) -- the error is
+// swallowed deliberately, not silently masking a bug elsewhere.
+func logCrossOrgAccess(ctx context.Context, db *sql.DB, actorUID, actorOrgID, targetUID, targetOrgID int, action string) {
+	if db == nil {
+		return
+	}
+	_, _ = db.ExecContext(ctx,
+		`INSERT INTO cross_org_access_log (actor_uid, actor_org_id, target_uid, target_org_id, action) VALUES (?, ?, ?, ?, ?)`,
+		actorUID, actorOrgID, targetUID, targetOrgID, action)
 }

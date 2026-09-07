@@ -29,6 +29,7 @@ func setupSQLiteProjector(t *testing.T) *SQLiteProjector {
 			is_provider   INTEGER NOT NULL DEFAULT 0,
 			is_operator_admin INTEGER NOT NULL DEFAULT 0,
 			is_provider_admin INTEGER NOT NULL DEFAULT 0,
+			org_id INTEGER NOT NULL DEFAULT 0,
 			created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE (email)

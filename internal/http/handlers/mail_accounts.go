@@ -117,38 +117,45 @@ func (h *MailAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 	// Annotate each account with the local_uid it's assigned to (if any), so the admin console
 	// can show "who owns this mailbox" without a second round trip.
 	type credRow struct {
-		localUID  int
-		createdBy sql.NullInt64
+		localUID    int
+		createdBy   sql.NullInt64
+		owningOrgID int
 	}
 	credByEmail := map[string]credRow{}
 	if h.DB != nil {
-		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email, created_by FROM mail_account_credentials`)
+		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email, created_by, owning_org_id FROM mail_account_credentials`)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var c credRow
 				var email string
-				if rows.Scan(&c.localUID, &email, &c.createdBy) == nil {
+				if rows.Scan(&c.localUID, &email, &c.createdBy, &c.owningOrgID) == nil {
 					credByEmail[strings.ToLower(email)] = c
 				}
 			}
 		}
 	}
 
-	// CP-HIPAA-1 minimum-necessary scoping: a provider-only caller (no users.admin) sees only
-	// mailboxes THEY created -- an unlinked mailbox, or one created by someone else, is invisible
-	// to them, not just unannotated.
+	// CP-HIPAA-1/CP-HIPAA-3 minimum-necessary scoping: a provider-only caller (no users.admin)
+	// sees mailboxes THEY created, OR any mailbox whose owning organization shares a trusted
+	// cluster with the caller's own organization ("the admins from that collective should be
+	// able to administer participants from that cluster of providers") -- an unlinked mailbox,
+	// or one from neither category, is invisible to them, not just unannotated.
 	isAdmin := hasPermission(r, "users.admin")
 	var callerUID *int
+	callerOrg := 0
 	if !isAdmin {
 		callerUID = callerLocalUID(r)
+		callerOrg = callerOrgID(r)
 	}
 
 	out := make([]mailAccountWithOwner, 0, len(accounts))
 	for _, a := range accounts {
 		c, linked := credByEmail[strings.ToLower(a.EmailAddress)]
 		if !isAdmin {
-			if !linked || !c.createdBy.Valid || callerUID == nil || int(c.createdBy.Int64) != *callerUID {
+			ownCreation := linked && c.createdBy.Valid && callerUID != nil && int(c.createdBy.Int64) == *callerUID
+			clusterMate := linked && orgsShareCluster(r.Context(), h.DB, callerOrg, c.owningOrgID)
+			if !ownCreation && !clusterMate {
 				continue
 			}
 		}
@@ -268,14 +275,18 @@ func (h *MailAccountsHandler) storeCredential(r *http.Request, uid int, email, p
 	}
 	now := time.Now().UTC()
 	createdBy := operatorUIDFromContext(r)
+	// CP-HIPAA-3: owning_org_id snapshots the CREATOR's own org_id at provisioning time (same
+	// "snapshot, don't live-join" idiom created_by already established) -- the real fact a
+	// cluster-mate provider's own list/reveal-password access is scoped against.
+	owningOrgID := callerOrgID(r)
 	_, err = h.DB.ExecContext(r.Context(), `
-		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, owning_org_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			email = excluded.email,
 			password_enc = excluded.password_enc,
 			updated_at = excluded.updated_at
-	`, uid, email, enc, createdBy, now, now)
+	`, uid, email, enc, createdBy, owningOrgID, now, now)
 	return err
 }
 
@@ -292,8 +303,9 @@ func (h *MailAccountsHandler) revealPassword(w http.ResponseWriter, r *http.Requ
 	}
 	var email, enc string
 	var createdBy sql.NullInt64
+	var owningOrgID int
 	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT email, password_enc, created_by FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc, &createdBy)
+		`SELECT email, password_enc, created_by, owning_org_id FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc, &createdBy, &owningOrgID)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no mailbox linked to this user"})
 		return
@@ -302,13 +314,21 @@ func (h *MailAccountsHandler) revealPassword(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// CP-HIPAA-1 minimum-necessary scoping: a provider-only caller may only reveal a password
-	// for a mailbox they themselves created.
+	// CP-HIPAA-1/CP-HIPAA-3 minimum-necessary scoping: a provider-only caller may reveal a
+	// password for a mailbox they themselves created, OR one whose owning organization shares a
+	// trusted cluster with their own -- the real "service navigator" cross-org case, logged
+	// below since revealing a live credential is more sensitive than a password reset.
 	if !hasPermission(r, "users.admin") {
 		callerUID := callerLocalUID(r)
-		if callerUID == nil || !createdBy.Valid || int(createdBy.Int64) != *callerUID {
+		ownCreation := callerUID != nil && createdBy.Valid && int(createdBy.Int64) == *callerUID
+		callerOrg := callerOrgID(r)
+		clusterMate := orgsShareCluster(r.Context(), h.DB, callerOrg, owningOrgID)
+		if !ownCreation && !clusterMate {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
+		}
+		if !ownCreation && clusterMate && callerUID != nil {
+			logCrossOrgAccess(r.Context(), h.DB, *callerUID, callerOrg, uid, owningOrgID, "reveal_mail_password")
 		}
 	}
 	password, err := mailaccounts.DecryptSecret(h.CredentialsKey, enc)

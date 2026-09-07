@@ -39,8 +39,19 @@ type LocalUser struct {
 	// (the "providers.manage" permission).
 	IsOperatorAdmin bool
 	IsProviderAdmin bool
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// OrgID -- CP-HIPAA-3 (founder real-time: "there may be a several organizations who have
+	// service agreements with each other... the admins from that collective should be able to
+	// administer participants from that cluster of providers"). Dual real meaning by role, same
+	// field either way: for a Provider/Provider Admin/Operator Admin/Top Admin, the organization
+	// THEY work for; for a participant, the organization that onboarded them (stamped
+	// automatically from the creating provider's own OrgID at account-creation time -- see
+	// UserCreatedData.OrgID and users.go's own createUser -- "batteries included happy path": a
+	// provider never picks an org by hand, it's inherited). 0 = no organization assigned, the
+	// safe, backward-compatible default -- see 202609070007_local_users_org_id.sql's own doc
+	// comment for why 0 must never "share a cluster" with anything, including another 0.
+	OrgID     int
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // UserProjector is the interface both SQLite and MySQL projectors implement.
@@ -98,6 +109,11 @@ const (
 	// RBAC tiers. Same grant/revoke-in-one-event-type shape as the two above.
 	EventUserOperatorAdminChanged = "local_user.operator_admin_changed"
 	EventUserProviderAdminChanged = "local_user.provider_admin_changed"
+	// EventUserOrgChanged -- CP-HIPAA-3. An admin (re)assigning an existing user's organization
+	// after the fact, distinct from the "stamped automatically at creation" path
+	// (UserCreatedData.OrgID) -- e.g. correcting a mis-onboarded participant, or moving a
+	// provider to a different organization.
+	EventUserOrgChanged = "local_user.org_changed"
 )
 
 // ── event payload types ──────────────────────────────────────────────────────
@@ -107,6 +123,11 @@ type UserCreatedData struct {
 	Email        string `json:"email"`
 	DisplayName  string `json:"display_name"`
 	PasswordHash string `json:"password_hash"`
+	// OrgID -- CP-HIPAA-3: stamped once, at creation time, from the creating provider's own
+	// OrgID ("batteries included happy path" -- see users.go's own createUser). 0 (the JSON
+	// zero-value, correctly absent/defaulted on every event appended before this field existed)
+	// means no organization -- same safe default LocalUser.OrgID's own doc comment describes.
+	OrgID int `json:"org_id,omitempty"`
 }
 
 type UserUpdatedData struct {
@@ -144,6 +165,11 @@ type UserOperatorAdminChangedData struct {
 type UserProviderAdminChangedData struct {
 	LocalUID        int  `json:"local_uid"`
 	IsProviderAdmin bool `json:"is_provider_admin"`
+}
+
+type UserOrgChangedData struct {
+	LocalUID int `json:"local_uid"`
+	OrgID    int `json:"org_id"`
 }
 
 type UserDeletedData struct {
