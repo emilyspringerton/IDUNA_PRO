@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-07
+- White-label branding config (CP-WHITELABEL-1) + compliance-recording storage (CP-COMPLIANCE-REC-1): general per-instance branding API, consent-announcement audio upload/storage. (sess-20260905-0720-ec33e7c5)
 - Multi-org provider-cluster trust model (CP-HIPAA-3): organizations/cluster_id table, cross-org password reset + mail/SIP visibility for clustered orgs, cross_org_access_log FWA audit trail. (sess-20260905-0720-ec33e7c5)
 - 4-tier RBAC hierarchy (Top Admin/Operator Admin/Provider Admin/Provider Operator) with real tier-guard enforcement, plus sip-accounts.provision extending provider scoping to SIP account provisioning (CP-HIPAA-2). (sess-20260905-0720-ec33e7c5)
 - New least-privilege mail-accounts.provision role (IsProvider) letting providers create/manage participant mailboxes and identities, scoped server-side to only what they themselves created (minimum-necessary access, CP-HIPAA-1). (sess-20260905-0720-ec33e7c5)
