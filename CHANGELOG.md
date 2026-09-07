@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-07
+- SAGA audit: README/CLAUDE.md catch-up (organizations, branding, compliance-recording, GDPR, RBAC). (sess-20260905-0720-ec33e7c5)
 - White-label branding config (CP-WHITELABEL-1) + compliance-recording storage (CP-COMPLIANCE-REC-1): general per-instance branding API, consent-announcement audio upload/storage. (sess-20260905-0720-ec33e7c5)
 - Multi-org provider-cluster trust model (CP-HIPAA-3): organizations/cluster_id table, cross-org password reset + mail/SIP visibility for clustered orgs, cross_org_access_log FWA audit trail. (sess-20260905-0720-ec33e7c5)
 - 4-tier RBAC hierarchy (Top Admin/Operator Admin/Provider Admin/Provider Operator) with real tier-guard enforcement, plus sip-accounts.provision extending provider scoping to SIP account provisioning (CP-HIPAA-2). (sess-20260905-0720-ec33e7c5)
