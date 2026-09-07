@@ -217,6 +217,13 @@ func operatorAdminPermissions() []string {
 		// have -- same "the two local accounts that actually exist" grant pattern this
 		// function already establishes for devportal.access/kanban.access.
 		"twilio.admin",
+		// branding.admin -- CP-WHITELABEL-1 ("it needs to be both white labeled first then
+		// made into carepyre"): configures the per-instance app name/tagline/colors/logo
+		// (BrandingHandler.Put). Same platform-operator tier as twilio.admin/organizations.go.
+		"branding.admin",
+		// compliance.recording.manage -- CP-COMPLIANCE-REC-1: record/replace the "this call
+		// may be recorded" consent-announcement audio (ComplianceRecordingHandler).
+		"compliance.recording.manage",
 	}
 }
 

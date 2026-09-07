@@ -332,6 +332,28 @@ func main() {
 	mux.Handle("/api/v1/organizations", orgsProtected)
 	mux.Handle("/api/v1/organizations/", orgsProtected)
 
+	// CP-WHITELABEL-1: GET is deliberately public (unauthenticated) -- a login screen needs to
+	// render branded before anyone has a token. PUT is branding.admin-gated. Two separate
+	// method-scoped ServeMux registrations on the same path (Go 1.22+ stdlib pattern syntax).
+	brandingH := &handlers.BrandingHandler{DB: db}
+	mux.HandleFunc("GET /api/v1/branding", brandingH.Get)
+	mux.Handle("PUT /api/v1/branding",
+		middleware.RequireAuth(keys)(middleware.RequirePermission("branding.admin")(http.HandlerFunc(brandingH.Put))))
+
+	// CP-COMPLIANCE-REC-1: both routes are compliance.recording.manage-gated.
+	complianceRecH := &handlers.ComplianceRecordingHandler{DB: db}
+	complianceRecProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("compliance.recording.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			complianceRecH.Get(w, r)
+		case http.MethodPut:
+			complianceRecH.Put(w, r)
+		default:
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/v1/compliance/recording", complianceRecProtected)
+
 	// CP-SIP-1244543543 -- sip-accounts mixes a self-read route (/me) with users.admin-gated
 	// admin routes inside the one handler, same real shape usersH's own getUser/updateUser
 	// split already establishes.
