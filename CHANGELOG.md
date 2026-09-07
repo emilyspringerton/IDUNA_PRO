@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-07
+- 4-tier RBAC hierarchy (Top Admin/Operator Admin/Provider Admin/Provider Operator) with real tier-guard enforcement, plus sip-accounts.provision extending provider scoping to SIP account provisioning (CP-HIPAA-2). (sess-20260905-0720-ec33e7c5)
 - New least-privilege mail-accounts.provision role (IsProvider) letting providers create/manage participant mailboxes and identities, scoped server-side to only what they themselves created (minimum-necessary access, CP-HIPAA-1). (sess-20260905-0720-ec33e7c5)
 
 - Real GDPR data subject request pipeline: internal/gdpr Export/Delete, FileEventLog.RedactUser + UserProjector.ScrubPII for actual PII erasure from the event-sourced userlog, /api/v1/gdpr/{export,delete,requests} HTTP endpoints (self-service + admin-on-behalf-of via users.admin). (sess-20260905-0720-ec33e7c5)
