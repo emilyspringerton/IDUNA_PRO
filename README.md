@@ -31,6 +31,31 @@ fresh SQLite file, confirmed `/health`, `/.well-known/jwks.json` (a real ES256 k
 self-serve `POST /api/v1/auth/register` issuing a real JWT, and `POST /api/v1/auth/local`
 correctly rejecting bad credentials.
 
+## Shipped since, not previously listed here (SAGA audit catch-up, 2026-09-07)
+
+Real, tested, live-routed features that landed after the list above was last updated (see
+`CHANGELOG.md` for exact dates) — a SAGA-style audit found this README undercounted the repo's
+own real scope, so registering them here now:
+
+- **Organizations / cluster trust model** (`internal/http/handlers/organizations.go`,
+  `GET/POST /api/v1/organizations`, `PATCH /api/v1/organizations/{id}`) — a real, minimal
+  multi-tenant trust model (a nullable `cluster_id` on each org; two orgs sharing one cluster
+  trust each other for participant administration). The driving worked example and full design
+  writeup live in `CarePyre/docs/HIPAA_COMPLIANCE_NORTHSTAR.md`, not here — this is the general
+  platform mechanism CarePyre is the first real tenant of.
+- **White-label branding** (`internal/http/handlers/branding.go`, `GET`/`PUT /api/v1/branding`)
+  — per-instance app name/tagline/colors/logo, public `GET` (a login screen needs to render
+  branded pre-auth), `branding.admin`-gated `PUT`.
+- **Compliance-recording storage** (`internal/http/handlers/compliance_recording.go`,
+  `/api/v1/compliance/recording`) — stores the "this call may be recorded" consent-announcement
+  audio a tenant records via their own console, `compliance.recording.manage`-gated.
+- **GDPR export/erasure pipeline** (`internal/gdpr/`, `/api/v1/gdpr/`) — Article 15/17/20
+  self-service data export and deletion requests.
+- **4-tier RBAC** (Top Admin / Operator Admin / Provider Admin / Provider Operator —
+  `admins.manage`/`providers.manage`/`mail-accounts.provision`/`sip-accounts.provision`
+  permissions, `internal/http/handlers/local_auth.go`) — real, server-side-enforced tier guards,
+  not just UI hiding, on top of the base auth model above.
+
 ## Real gap, fixed (2026-09-04, cruise-queue card 9988)
 
 `GET /api/v1/identities/me` used to look up every subject via `store.GetUserByID`, which only

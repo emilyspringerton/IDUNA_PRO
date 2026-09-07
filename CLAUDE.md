@@ -47,6 +47,13 @@ Not yet built: the extensibility hook contract (PARENA mods via `burrow build`),
 an online editor, `console.okemily.com`, or the tenant-provisioning control plane (all real,
 separately scoped in the NORTHSTAR doc above).
 
+**Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
+the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
+organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),
+compliance-recording storage (`compliance_recording.go`), the GDPR export/erasure pipeline
+(`internal/gdpr/`), and the 4-tier RBAC model (Top Admin/Operator Admin/Provider Admin/Provider
+Operator). All live-routed in `main.go`, all with real tests.
+
 ## Stack
 
 Go 1.25, `GOWORK=off` (standalone module, not part of the monorepo's `go.work`) — same real,
