@@ -131,6 +131,37 @@ func TestSQLiteProjector_Deleted(t *testing.T) {
 	}
 }
 
+func TestSQLiteProjector_ScrubPII(t *testing.T) {
+	proj := setupSQLiteProjector(t)
+	ctx := context.Background()
+
+	proj.Apply(ctx, makeRec(1, EventUserCreated, UserCreatedData{
+		LocalUID: 5, Email: "real@example.com", DisplayName: "Real Name", PasswordHash: "realhash",
+	}))
+	proj.Apply(ctx, makeRec(2, EventUserDeleted, UserDeletedData{LocalUID: 5}))
+
+	if err := proj.ScrubPII(ctx, 5); err != nil {
+		t.Fatalf("ScrubPII: %v", err)
+	}
+
+	// GetByUID itself already hides deleted users (see TestSQLiteProjector_Deleted above) --
+	// that's a query-level filter, not proof the real column values are gone. Read the raw row
+	// directly to confirm ScrubPII actually overwrote them, not just that they're hidden.
+	var email, displayName, passwordHash, status string
+	err := proj.db.QueryRowContext(ctx,
+		`SELECT email, display_name, password_hash, status FROM local_users WHERE local_uid = ?`, 5,
+	).Scan(&email, &displayName, &passwordHash, &status)
+	if err != nil {
+		t.Fatalf("query raw row: %v", err)
+	}
+	if email != redactionMarker || displayName != redactionMarker || passwordHash != redactionMarker {
+		t.Errorf("expected all PII columns redacted, got email=%q display_name=%q password_hash=%q", email, displayName, passwordHash)
+	}
+	if status != "deleted" {
+		t.Errorf("expected status to remain 'deleted' (ScrubPII must not touch it), got %q", status)
+	}
+}
+
 func TestSQLiteProjector_CursorAdvance(t *testing.T) {
 	proj := setupSQLiteProjector(t)
 	ctx := context.Background()

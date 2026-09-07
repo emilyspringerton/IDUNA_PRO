@@ -55,6 +55,7 @@ import (
 
 	"idunapro/internal/auth/device"
 	authjwt "idunapro/internal/auth/jwt"
+	"idunapro/internal/gdpr"
 	"idunapro/internal/http/handlers"
 	"idunapro/internal/http/middleware"
 	"idunapro/internal/mailaccounts"
@@ -163,6 +164,10 @@ func main() {
 	applesH := &handlers.ApplesHandler{Store: iamStore, ApplesGitDir: os.Getenv("APPLES_GIT_DIR"), EventLog: unifiedLog}
 	agentsH := &handlers.AgentsHandler{Store: iamStore}
 	usersH := &handlers.UsersHandler{Log: uel, Proj: userProj}
+	gdprH := &handlers.GDPRHandler{
+		Deps:      gdpr.Deps{DB: db, Log: uel, Proj: userProj},
+		ExportDir: filepath.Join(root, "var", "gdpr-exports"),
+	}
 	localAuthH := &handlers.LocalAuthHandler{Keys: keys, Proj: userProj, Issuer: issuer, EventLog: unifiedLog}
 	registerH := &handlers.RegisterHandler{Keys: keys, Log: uel, Proj: userProj, Store: iamStore, Issuer: issuer}
 	logsH := &handlers.LogsHandler{Store: unifiedLog, HECToken: getenv("IDUNA_HEC_TOKEN", "")}
@@ -318,6 +323,9 @@ func main() {
 	usersProtected := middleware.RequireAuth(keys)(usersH)
 	mux.Handle("/api/v1/users", usersProtected)
 	mux.Handle("/api/v1/users/", usersProtected)
+
+	gdprProtected := middleware.RequireAuth(keys)(gdprH)
+	mux.Handle("/api/v1/gdpr/", gdprProtected)
 
 	// CP-SIP-1244543543 -- sip-accounts mixes a self-read route (/me) with users.admin-gated
 	// admin routes inside the one handler, same real shape usersH's own getUser/updateUser

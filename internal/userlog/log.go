@@ -271,6 +271,219 @@ func (l *FileEventLog) sortedJournalFiles() ([]string, error) {
 	return names, nil
 }
 
+// RedactUser implements the real half of GDPR erasure this package's own append-only design
+// doesn't get for free: appending a EventUserDeleted record only ever updates the SQL
+// PROJECTION (see sqlite_projector.go's own Apply, which just sets status='deleted' -- the
+// original email/display_name/password_hash from that user's real local_user.created event, and
+// any local_user.updated/password_reset events since, stay in the raw NDJSON files on disk
+// FOREVER, because Append() never rewrites a line once it's written. A "GDPR delete" that only
+// appends another event and calls it done would be misleading -- the real personal data would
+// still be sitting in plain files, replayable by anyone with disk access or by rebuilding the
+// projection from scratch.
+//
+// RedactUser scans every journal file for records whose Event.Data references localUID (every
+// event payload type in this package -- created/updated/password_reset/status_changed/
+// admin_changed/deleted -- carries a local_uid field), and overwrites the PII-bearing string
+// fields in place (Email, DisplayName, PasswordHash) with a fixed redaction marker, while
+// leaving the record's own structural fields (Sequence, Type, OccurredAt, the non-PII parts of
+// Data like OldStatus/NewStatus/IsAdmin) intact -- the event HAPPENED, and this repo's own
+// append-only design depends on sequence/structure staying replayable; only the personal DATA
+// inside it is erased, matching how real event-sourced systems handle right-to-erasure
+// (redaction-in-place / crypto-shredding) rather than mutating history's shape.
+//
+// Real, deliberate scope: this rewrites files under the log's own lock, and if the file being
+// rewritten is the one currently open for appends, it closes and reopens the handle afterward --
+// a concurrent Append during a RedactUser call blocks on the same mutex Append already uses, so
+// there is no window where a write could land on a file mid-rewrite.
+func (l *FileEventLog) RedactUser(_ context.Context, localUID int) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	files, err := l.sortedJournalFiles()
+	if err != nil {
+		return 0, err
+	}
+
+	needReopenCurrent := false
+	total := 0
+	for _, name := range files {
+		path := filepath.Join(l.eventsDir, name)
+		n, changed, err := redactFile(path, localUID)
+		if err != nil {
+			return total, fmt.Errorf("userlog: redact %s: %w", name, err)
+		}
+		total += n
+		if changed && l.current != nil && filepath.Base(l.journalPath(l.clock())) == name {
+			needReopenCurrent = true
+		}
+	}
+
+	if needReopenCurrent {
+		_ = l.current.Close()
+		f, err := os.OpenFile(l.journalPath(l.clock()), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return total, fmt.Errorf("userlog: reopen current journal after redaction: %w", err)
+		}
+		l.current = f
+	}
+	return total, nil
+}
+
+const redactionMarker = "[redacted-gdpr-erasure]"
+
+// eventLocalUID extracts the local_uid field common to every event payload type in this
+// package, without needing a type-specific unmarshal first -- every UserXxxData struct
+// json-tags this field the same way ("local_uid"), so a generic probe is safe and future-proof
+// against new event types that follow the same convention.
+func eventLocalUID(data json.RawMessage) (int, bool) {
+	var probe struct {
+		LocalUID int `json:"local_uid"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return 0, false
+	}
+	return probe.LocalUID, probe.LocalUID != 0
+}
+
+// redactPII overwrites the known PII-bearing string fields for rec's own event type, returning
+// the possibly-modified Data and whether anything actually changed (a record can legitimately
+// have nothing to redact -- e.g. UserStatusChangedData/UserAdminChangedData/UserDeletedData
+// carry no PII at all, only structural fields, so those pass through byte-for-byte unchanged).
+func redactPII(rec *Record) (bool, error) {
+	switch rec.Event.Type {
+	case EventUserCreated:
+		var d UserCreatedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return false, err
+		}
+		if d.Email == redactionMarker && d.DisplayName == redactionMarker && d.PasswordHash == redactionMarker {
+			return false, nil // already redacted -- idempotent no-op, not a re-write
+		}
+		d.Email = redactionMarker
+		d.DisplayName = redactionMarker
+		d.PasswordHash = redactionMarker
+		b, err := json.Marshal(d)
+		if err != nil {
+			return false, err
+		}
+		rec.Event.Data = b
+		return true, nil
+	case EventUserUpdated:
+		var d UserUpdatedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return false, err
+		}
+		emailAlready := d.Email == nil || *d.Email == redactionMarker
+		nameAlready := d.DisplayName == nil || *d.DisplayName == redactionMarker
+		if emailAlready && nameAlready {
+			return false, nil // already redacted (or never carried PII to begin with)
+		}
+		redacted := redactionMarker
+		if d.Email != nil {
+			d.Email = &redacted
+		}
+		if d.DisplayName != nil {
+			d.DisplayName = &redacted
+		}
+		b, err := json.Marshal(d)
+		if err != nil {
+			return false, err
+		}
+		rec.Event.Data = b
+		return true, nil
+	case EventUserPasswordReset:
+		var d UserPasswordResetData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return false, err
+		}
+		if d.PasswordHash == redactionMarker {
+			return false, nil // already redacted
+		}
+		d.PasswordHash = redactionMarker
+		b, err := json.Marshal(d)
+		if err != nil {
+			return false, err
+		}
+		rec.Event.Data = b
+		return true, nil
+	default:
+		// EventUserStatusChanged, EventUserAdminChanged, EventUserDeleted (and any future,
+		// unrecognized type) carry no PII fields -- nothing to redact, left byte-for-byte alone.
+		return false, nil
+	}
+}
+
+// redactFile rewrites one NDJSON journal file in place (tmp file + atomic rename, same pattern
+// persistSeq already uses), redacting every record for localUID. Returns how many records were
+// redacted and whether the file's own bytes actually changed (a file with no matching records
+// is left completely untouched, not needlessly rewritten).
+func redactFile(path string, localUID int) (int, bool, error) {
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("open: %w", err)
+	}
+	defer f.Close()
+
+	var out []byte
+	count := 0
+	changed := false
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec Record
+		if err := json.Unmarshal(line, &rec); err != nil {
+			// Corrupt line -- same "skip, don't fail the whole read" tolerance readFile already
+			// has; passed through unchanged rather than dropped, since we can't safely tell
+			// whether it belongs to this user.
+			out = append(out, line...)
+			out = append(out, '\n')
+			continue
+		}
+		uid, ok := eventLocalUID(rec.Event.Data)
+		if ok && uid == localUID {
+			didRedact, err := redactPII(&rec)
+			if err != nil {
+				return count, changed, fmt.Errorf("redact record seq=%d: %w", rec.Sequence, err)
+			}
+			if didRedact {
+				count++
+				changed = true
+				newLine, err := json.Marshal(rec)
+				if err != nil {
+					return count, changed, fmt.Errorf("marshal redacted record seq=%d: %w", rec.Sequence, err)
+				}
+				out = append(out, newLine...)
+				out = append(out, '\n')
+				continue
+			}
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	if err := sc.Err(); err != nil {
+		return count, changed, err
+	}
+	if !changed {
+		return 0, false, nil
+	}
+
+	tmp := path + ".redact-tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return count, changed, fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return count, changed, fmt.Errorf("rename: %w", err)
+	}
+	return count, changed, nil
+}
+
 func (l *FileEventLog) recoverSeq() (uint64, error) {
 	data, err := os.ReadFile(l.seqFile)
 	if os.IsNotExist(err) {

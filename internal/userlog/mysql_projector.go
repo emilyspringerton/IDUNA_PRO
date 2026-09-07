@@ -175,6 +175,15 @@ func (p *MySQLProjector) NextUID(ctx context.Context) (int, error) {
 	return int(max.Int64) + 1, nil
 }
 
+func (p *MySQLProjector) ScrubPII(ctx context.Context, uid int) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := p.db.ExecContext(ctx,
+		`UPDATE local_users SET email = ?, display_name = ?, password_hash = ?, updated_at = ? WHERE local_uid = ?`,
+		redactionMarker, redactionMarker, redactionMarker, now, uid,
+	)
+	return err
+}
+
 func (p *MySQLProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	var u LocalUser
 	var isAdmin int

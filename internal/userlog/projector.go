@@ -51,6 +51,16 @@ type UserProjector interface {
 
 	// NextUID returns max(local_uid)+1 so callers can assign new UIDs sequentially.
 	NextUID(ctx context.Context) (int, error)
+
+	// ScrubPII overwrites email/display_name/password_hash for uid with a fixed redaction
+	// marker directly in the SQL projection (internal/gdpr's own real erasure pipeline --
+	// founder real-time, 2026-09-07: "build gdpr into iduna pro... data delete request
+	// pipeline"). Real, found-live gap this closes: the existing EventUserDeleted/
+	// UserDeletedData flow (Apply, above) only ever sets status='deleted' -- the row's own
+	// email/display_name/password_hash columns are untouched, so a "deleted" user's real PII
+	// still sits in this table forever. Does NOT touch local_uid, status, or timestamps --
+	// this is a redaction, not a row delete (other tables may still reference local_uid).
+	ScrubPII(ctx context.Context, uid int) error
 }
 
 // ── event type constants ────────────────────────────────────────────────────

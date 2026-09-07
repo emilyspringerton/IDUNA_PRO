@@ -36,6 +36,7 @@ func (s *stubUserProjector) ListUsers(context.Context, int) ([]userlog.LocalUser
 	return nil, nil
 }
 func (s *stubUserProjector) NextUID(context.Context) (int, error) { return 1, nil }
+func (s *stubUserProjector) ScrubPII(context.Context, int) error  { return nil }
 
 func mustHash(t *testing.T, password string) string {
 	t.Helper()
