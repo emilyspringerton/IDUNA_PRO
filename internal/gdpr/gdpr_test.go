@@ -31,6 +31,7 @@ func setupDeps(t *testing.T) (gdpr.Deps, *sql.DB) {
 			password_hash TEXT    NOT NULL DEFAULT '',
 			status        TEXT    NOT NULL DEFAULT 'active',
 			is_admin      INTEGER NOT NULL DEFAULT 0,
+			is_provider   INTEGER NOT NULL DEFAULT 0,
 			created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE (email)

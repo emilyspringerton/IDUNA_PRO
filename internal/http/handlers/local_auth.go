@@ -82,14 +82,14 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	exp := time.Now().UTC().Add(8 * time.Hour)
 	sub := "local:" + itoa(user.LocalUID)
 	claims := map[string]any{
-		"sub":         sub,
-		"local_uid":   user.LocalUID,
-		"email":       user.Email,
+		"sub":          sub,
+		"local_uid":    user.LocalUID,
+		"email":        user.Email,
 		"display_name": user.DisplayName,
-		"permissions": localUserPermissions(user),
-		"iss":         issuer,
-		"aud":         "farthq-ecosystem",
-		"exp":         exp.Unix(),
+		"permissions":  localUserPermissions(user),
+		"iss":          issuer,
+		"aud":          "farthq-ecosystem",
+		"exp":          exp.Unix(),
 	}
 	token, err := authjwt.Sign(h.Keys, claims)
 	if err != nil {
@@ -161,7 +161,17 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 			"twilio.admin",
 		}
 	}
-	return []string{"iduna.me.read", "users.read.self", "devportal.access"}
+	base := []string{"iduna.me.read", "users.read.self", "devportal.access"}
+	// mail-accounts.provision -- CP-HIPAA-1 ("we can allow providers to create email accounts
+	// for participants"). A real, least-privilege grant distinct from the full admin set above:
+	// a provider can provision/manage participant mailboxes (MailAccountsHandler) but gets none
+	// of users.admin's other console-wide capabilities (kanban, mailing list, Twilio, user
+	// management itself). Same "the two local accounts that actually exist" DB-backed grant
+	// pattern IsAdmin already established, via IsProvider/EventUserProviderChanged.
+	if u.IsProvider {
+		base = append(base, "mail-accounts.provision")
+	}
+	return base
 }
 
 func itoa(n int) string {

@@ -30,8 +30,8 @@ func (p *MySQLProjector) Apply(ctx context.Context, rec Record) error {
 		now := rec.AppendedAt.UTC().Format("2006-01-02 15:04:05")
 		_, err := p.db.ExecContext(ctx,
 			`INSERT IGNORE INTO local_users
-			 (local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'active', 0, ?, ?)`,
+			 (local_uid, email, display_name, password_hash, status, is_admin, is_provider, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'active', 0, 0, ?, ?)`,
 			d.LocalUID, d.Email, d.DisplayName, d.PasswordHash, now, now,
 		)
 		return err
@@ -96,6 +96,18 @@ func (p *MySQLProjector) Apply(ctx context.Context, rec Record) error {
 		)
 		return err
 
+	case EventUserProviderChanged:
+		var d UserProviderChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return fmt.Errorf("mysql projector apply provider_changed: %w", err)
+		}
+		now := rec.AppendedAt.UTC().Format("2006-01-02 15:04:05")
+		_, err := p.db.ExecContext(ctx,
+			`UPDATE local_users SET is_provider=?, updated_at=? WHERE local_uid=?`,
+			d.IsProvider, now, d.LocalUID,
+		)
+		return err
+
 	case EventUserDeleted:
 		var d UserDeletedData
 		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
@@ -132,7 +144,7 @@ func (p *MySQLProjector) AdvanceCursor(ctx context.Context, seq uint64) error {
 
 func (p *MySQLProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, created_at, updated_at
 		 FROM local_users WHERE local_uid=? AND status != 'deleted'`,
 		uid,
 	))
@@ -140,14 +152,14 @@ func (p *MySQLProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, err
 
 func (p *MySQLProjector) GetByEmail(ctx context.Context, email string) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, created_at, updated_at
 		 FROM local_users WHERE email=? AND status != 'deleted'`,
 		email,
 	))
 }
 
 func (p *MySQLProjector) ListUsers(ctx context.Context, limit int) ([]LocalUser, error) {
-	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, created_at, updated_at
+	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, created_at, updated_at
 	      FROM local_users WHERE status != 'deleted' ORDER BY local_uid ASC`
 	var rows *sql.Rows
 	var err error
@@ -186,10 +198,10 @@ func (p *MySQLProjector) ScrubPII(ctx context.Context, uid int) error {
 
 func (p *MySQLProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	var u LocalUser
-	var isAdmin int
+	var isAdmin, isProvider int
 	var createdStr, updatedStr string
 	err := row.Scan(
-		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin,
+		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
 		&createdStr, &updatedStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -199,6 +211,7 @@ func (p *MySQLProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 		return nil, err
 	}
 	u.IsAdmin = isAdmin != 0
+	u.IsProvider = isProvider != 0
 	// MySQL with parseTime=true returns time.Time; without it returns string.
 	// We handle both: try RFC3339 first, then MySQL DATETIME format.
 	u.CreatedAt = parseMyTime(createdStr)
@@ -210,15 +223,16 @@ func (p *MySQLProjector) scanRows(rows *sql.Rows) ([]LocalUser, error) {
 	var out []LocalUser
 	for rows.Next() {
 		var u LocalUser
-		var isAdmin int
+		var isAdmin, isProvider int
 		var createdStr, updatedStr string
 		if err := rows.Scan(
-			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin,
+			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
 			&createdStr, &updatedStr,
 		); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = isAdmin != 0
+		u.IsProvider = isProvider != 0
 		u.CreatedAt = parseMyTime(createdStr)
 		u.UpdatedAt = parseMyTime(updatedStr)
 		out = append(out, u)

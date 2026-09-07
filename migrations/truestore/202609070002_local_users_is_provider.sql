@@ -1,0 +1,12 @@
+-- CP-HIPAA-1 (founder real-time, 2026-09-07: "we can allow providers to create email accounts
+-- for participants" -- in a HIPAA-operational-framework context for CarePyre).
+--
+-- A real, least-privilege role distinct from full users.admin: a provider can provision and
+-- manage participant mailboxes (mail-accounts.provision, see localUserPermissions in
+-- internal/http/handlers/local_auth.go) without holding console-wide admin rights over every
+-- other user/kanban/mailing-list/Twilio capability admin already implies. Mirrors is_admin's own
+-- real, established pattern (CP-SIP-ADMIN-124323) exactly -- same DB-backed bool, same
+-- EventUserProviderChanged grant/revoke event, same PATCH /api/v1/users/{uid} API surface
+-- (gated on users.admin, same as is_admin already is) -- no chicken-and-egg genesis problem
+-- here since an existing admin can always grant this one via the real API.
+ALTER TABLE local_users ADD COLUMN is_provider INTEGER NOT NULL DEFAULT 0;

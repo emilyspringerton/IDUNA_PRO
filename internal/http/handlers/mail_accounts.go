@@ -32,17 +32,30 @@ import (
 // webmail session with no manual "Connect" step; this handler's own reveal-password route lets an
 // admin see it again later (e.g. to hand a user their password for a non-web mail client).
 //
-// Routes (all require Bearer JWT + users.admin, via middleware.RequireAuth + this handler's own
-// requirePerm):
+// CP-HIPAA-1 (founder real-time, 2026-09-07: "we can allow providers to create email accounts
+// for participants"): a caller holding the new, least-privilege mail-accounts.provision
+// permission (see localUserPermissions) can also reach every route here, alongside users.admin.
+// A provider MUST link every mailbox they create to a participant's local_uid (create rejects an
+// unlinked request from a provider-only caller with 400) -- HIPAA's own "minimum necessary"
+// principle means a provider's list/reveal-password views are scoped to only the mailboxes THEY
+// created (mail_account_credentials.created_by), never every participant in the system; a
+// users.admin caller keeps the unrestricted, system-wide view unchanged.
+//
+// Routes (all require Bearer JWT + users.admin OR mail-accounts.provision, via
+// middleware.RequireAuth + this handler's own requirePerm):
 //
 //	GET   /api/v1/mail-accounts                      list real mailboxes (each annotated with
-//	                                                  local_uid when one is assigned)
+//	                                                  local_uid when one is assigned); scoped to
+//	                                                  the caller's own provisioned mailboxes for
+//	                                                  a provider-only caller
 //	POST  /api/v1/mail-accounts                      create one -- {"username", "domain"
-//	                                                  (optional), "local_uid" (optional)}; when
+//	                                                  (optional), "local_uid" (optional, REQUIRED
+//	                                                  for a provider-only caller)}; when
 //	                                                  local_uid is set, the mailbox is
 //	                                                  auto-connected for that user's webmail
 //	GET   /api/v1/mail-accounts/{uid}/reveal-password reveal the stored password for a user's
-//	                                                  assigned mailbox
+//	                                                  assigned mailbox; a provider-only caller
+//	                                                  may only reveal mailboxes they created
 type MailAccountsHandler struct {
 	Client *mailaccounts.Client
 	DB     *sql.DB
@@ -57,7 +70,7 @@ func (h *MailAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "mail account provisioning not configured"})
 		return
 	}
-	if !hasPermission(r, "users.admin") {
+	if !hasPermission(r, "users.admin") && !hasPermission(r, "mail-accounts.provision") {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
@@ -103,24 +116,45 @@ func (h *MailAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 
 	// Annotate each account with the local_uid it's assigned to (if any), so the admin console
 	// can show "who owns this mailbox" without a second round trip.
-	uidByEmail := map[string]int{}
+	type credRow struct {
+		localUID  int
+		createdBy sql.NullInt64
+	}
+	credByEmail := map[string]credRow{}
 	if h.DB != nil {
-		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email FROM mail_account_credentials`)
+		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email, created_by FROM mail_account_credentials`)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
-				var uid int
+				var c credRow
 				var email string
-				if rows.Scan(&uid, &email) == nil {
-					uidByEmail[strings.ToLower(email)] = uid
+				if rows.Scan(&c.localUID, &email, &c.createdBy) == nil {
+					credByEmail[strings.ToLower(email)] = c
 				}
 			}
 		}
 	}
+
+	// CP-HIPAA-1 minimum-necessary scoping: a provider-only caller (no users.admin) sees only
+	// mailboxes THEY created -- an unlinked mailbox, or one created by someone else, is invisible
+	// to them, not just unannotated.
+	isAdmin := hasPermission(r, "users.admin")
+	var callerUID *int
+	if !isAdmin {
+		callerUID = callerLocalUID(r)
+	}
+
 	out := make([]mailAccountWithOwner, 0, len(accounts))
 	for _, a := range accounts {
+		c, linked := credByEmail[strings.ToLower(a.EmailAddress)]
+		if !isAdmin {
+			if !linked || !c.createdBy.Valid || callerUID == nil || int(c.createdBy.Int64) != *callerUID {
+				continue
+			}
+		}
 		item := mailAccountWithOwner{Account: a}
-		if uid, ok := uidByEmail[strings.ToLower(a.EmailAddress)]; ok {
+		if linked {
+			uid := c.localUID
 			item.LocalUID = &uid
 		}
 		out = append(out, item)
@@ -172,6 +206,13 @@ func (h *MailAccountsHandler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.LocalUID != nil && h.CredentialsKey == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "mailbox-to-user linking not configured (MAIL_CREDENTIALS_KEY unset)"})
+		return
+	}
+	// CP-HIPAA-1: a provider-only caller (no users.admin) must always link the mailbox to a
+	// participant -- an unlinked mailbox would be permanently invisible to them afterward (see
+	// list's own minimum-necessary scoping above), which is almost certainly not what they meant.
+	if req.LocalUID == nil && !hasPermission(r, "users.admin") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "local_uid is required when provisioning as a provider (not users.admin)"})
 		return
 	}
 
@@ -226,14 +267,15 @@ func (h *MailAccountsHandler) storeCredential(r *http.Request, uid int, email, p
 		return err
 	}
 	now := time.Now().UTC()
+	createdBy := operatorUIDFromContext(r)
 	_, err = h.DB.ExecContext(r.Context(), `
-		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			email = excluded.email,
 			password_enc = excluded.password_enc,
 			updated_at = excluded.updated_at
-	`, uid, email, enc, now, now)
+	`, uid, email, enc, createdBy, now, now)
 	return err
 }
 
@@ -249,8 +291,9 @@ func (h *MailAccountsHandler) revealPassword(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var email, enc string
+	var createdBy sql.NullInt64
 	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT email, password_enc FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc)
+		`SELECT email, password_enc, created_by FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc, &createdBy)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no mailbox linked to this user"})
 		return
@@ -258,6 +301,15 @@ func (h *MailAccountsHandler) revealPassword(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+	// CP-HIPAA-1 minimum-necessary scoping: a provider-only caller may only reveal a password
+	// for a mailbox they themselves created.
+	if !hasPermission(r, "users.admin") {
+		callerUID := callerLocalUID(r)
+		if callerUID == nil || !createdBy.Valid || int(createdBy.Int64) != *callerUID {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
 	}
 	password, err := mailaccounts.DecryptSecret(h.CredentialsKey, enc)
 	if err != nil {

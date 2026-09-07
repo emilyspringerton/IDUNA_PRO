@@ -22,9 +22,16 @@ type LocalUser struct {
 	// <email>`, a local CLI command with direct DB access -- no chicken-and-egg API call
 	// needed. Every admin after that can be granted via the real API
 	// (PATCH /api/v1/users/{uid} {"is_admin": true}, itself gated on users.admin).
-	IsAdmin   bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	IsAdmin bool
+	// IsProvider -- CP-HIPAA-1 ("we can allow providers to create email accounts for
+	// participants"). A real, least-privilege role distinct from IsAdmin: grants
+	// mail-accounts.provision (see localUserPermissions) without the rest of the admin
+	// permission set. Same DB-backed bool / grant-event / PATCH-API pattern IsAdmin already
+	// established, no separate genesis mechanism needed since granting it always requires an
+	// existing users.admin holder.
+	IsProvider bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // UserProjector is the interface both SQLite and MySQL projectors implement.
@@ -75,6 +82,9 @@ const (
 	// (IsAdmin true/false), matching UserStatusChangedData's own old/new shape rather than
 	// inventing a separate event per direction.
 	EventUserAdminChanged = "local_user.admin_changed"
+	// EventUserProviderChanged -- CP-HIPAA-1. Same grant/revoke-in-one-event-type shape as
+	// EventUserAdminChanged.
+	EventUserProviderChanged = "local_user.provider_changed"
 )
 
 // ── event payload types ──────────────────────────────────────────────────────
@@ -106,6 +116,11 @@ type UserStatusChangedData struct {
 type UserAdminChangedData struct {
 	LocalUID int  `json:"local_uid"`
 	IsAdmin  bool `json:"is_admin"`
+}
+
+type UserProviderChangedData struct {
+	LocalUID   int  `json:"local_uid"`
+	IsProvider bool `json:"is_provider"`
 }
 
 type UserDeletedData struct {

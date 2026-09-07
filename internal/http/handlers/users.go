@@ -18,7 +18,8 @@ import (
 //
 // Routes (all require Bearer JWT via middleware.RequireAuth):
 //
-//	POST   /api/v1/users            create user           requires users.admin
+//	POST   /api/v1/users            create user           requires users.admin OR
+//	                                                      mail-accounts.provision (CP-HIPAA-1)
 //	GET    /api/v1/users            list users            requires users.admin
 //	GET    /api/v1/users/{uid}      get user              requires users.admin OR sub=local:{uid}
 //	PATCH  /api/v1/users/{uid}      update user           requires users.admin
@@ -39,7 +40,18 @@ func (h *UsersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if path == "" || path == "/" {
 		switch r.Method {
 		case http.MethodPost:
-			h.requirePerm(w, r, "users.admin", h.createUser)
+			// CP-HIPAA-1: a provider (mail-accounts.provision) can also create a participant's
+			// local user record -- the real, necessary first half of "providers can create email
+			// accounts for participants" (a mailbox needs a local_uid to link to; only
+			// users.admin could ever create one before). createUser itself takes no is_admin/
+			// is_provider/status input, so a provider-only caller can't escalate anything via
+			// this route -- listUsers/updateUser/deleteUser stay users.admin-only below,
+			// unchanged, so a provider still can't browse or manage every OTHER participant.
+			if hasPermission(r, "users.admin") || hasPermission(r, "mail-accounts.provision") {
+				h.createUser(w, r)
+			} else {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			}
 		case http.MethodGet:
 			h.requirePerm(w, r, "users.admin", h.listUsers)
 		default:
@@ -199,6 +211,10 @@ type updateUserRequest struct {
 	// revokes admin on another user, gated the same as every other field here (this whole
 	// route already requires users.admin -- see ServeHTTP's own dispatch).
 	IsAdmin *bool `json:"is_admin,omitempty"`
+	// IsProvider -- CP-HIPAA-1: grants/revokes the least-privilege "provider" role
+	// (mail-accounts.provision only, not the rest of the admin permission set). Same gate as
+	// IsAdmin above -- this whole route already requires users.admin.
+	IsProvider *bool `json:"is_provider,omitempty"`
 }
 
 func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid int) {
@@ -332,6 +348,29 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
 	}
 
+	// Provider grant/revoke (CP-HIPAA-1). Same shape as the admin grant/revoke block above.
+	if req.IsProvider != nil {
+		payload, _ := json.Marshal(userlog.UserProviderChangedData{
+			LocalUID:   uid,
+			IsProvider: *req.IsProvider,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserProviderChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
 	updated, _ := h.Proj.GetByUID(ctx, uid)
 	if updated == nil {
 		updated = existing
@@ -382,9 +421,10 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		"status":       u.Status,
 		// is_admin -- CP-SIP-ADMIN-124323: real, so an admin console can show who already
 		// holds admin without guessing from local_uid==0 alone.
-		"is_admin":   u.LocalUID == 0 || u.IsAdmin,
-		"created_at": u.CreatedAt.Format(time.RFC3339),
-		"updated_at": u.UpdatedAt.Format(time.RFC3339),
+		"is_admin":    u.LocalUID == 0 || u.IsAdmin,
+		"is_provider": u.IsProvider,
+		"created_at":  u.CreatedAt.Format(time.RFC3339),
+		"updated_at":  u.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
