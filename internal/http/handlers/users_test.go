@@ -24,16 +24,56 @@ type fakeUserProjector struct {
 }
 
 func (p *fakeUserProjector) Apply(_ context.Context, rec userlog.Record) error {
-	if rec.Event.Type != userlog.EventUserCreated {
-		return nil
-	}
-	var d userlog.UserCreatedData
-	if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
-		return err
-	}
-	p.byUID[d.LocalUID] = &userlog.LocalUser{
-		LocalUID: d.LocalUID, Email: d.Email, DisplayName: d.DisplayName,
-		PasswordHash: d.PasswordHash, Status: "active",
+	switch rec.Event.Type {
+	case userlog.EventUserCreated:
+		var d userlog.UserCreatedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		p.byUID[d.LocalUID] = &userlog.LocalUser{
+			LocalUID: d.LocalUID, Email: d.Email, DisplayName: d.DisplayName,
+			PasswordHash: d.PasswordHash, Status: "active",
+		}
+	case userlog.EventUserStatusChanged:
+		var d userlog.UserStatusChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.Status = d.NewStatus
+		}
+	case userlog.EventUserAdminChanged:
+		var d userlog.UserAdminChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.IsAdmin = d.IsAdmin
+		}
+	case userlog.EventUserOperatorAdminChanged:
+		var d userlog.UserOperatorAdminChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.IsOperatorAdmin = d.IsOperatorAdmin
+		}
+	case userlog.EventUserProviderChanged:
+		var d userlog.UserProviderChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.IsProvider = d.IsProvider
+		}
+	case userlog.EventUserProviderAdminChanged:
+		var d userlog.UserProviderAdminChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.IsProviderAdmin = d.IsProviderAdmin
+		}
 	}
 	return nil
 }
@@ -122,5 +162,106 @@ func TestUsersHandler_NeitherPermissionCannotCreate(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 creating a user with neither permission, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// CP-HIPAA-2: the real 4-tier hierarchy -- Top Admin, Operator Admin, Provider Admin, Provider
+// Operator. These tests cover the one restriction the founder named directly: an Operator Admin
+// cannot modify or disable another admin-tier account (only a Top Admin can), plus the narrower
+// field scope a Provider-Admin-only caller gets.
+
+func newTierTestHandler(t *testing.T, keys *jwt.Keys, seed map[int]*userlog.LocalUser) http.Handler {
+	t.Helper()
+	eventLog, err := userlog.NewFileEventLog(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileEventLog: %v", err)
+	}
+	t.Cleanup(func() { _ = eventLog.Close() })
+	proj := &fakeUserProjector{byUID: seed}
+	h := &handlers.UsersHandler{Log: eventLog, Proj: proj}
+	return middleware.RequireAuth(keys)(h)
+}
+
+func patchUser(t *testing.T, h http.Handler, token string, uid int, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+itoaTest(uid), bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func itoaTest(n int) string {
+	b, _ := json.Marshal(n)
+	return string(b)
+}
+
+func TestUsersHandler_OperatorAdminCannotSuspendAnotherOperatorAdmin(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		2: {LocalUID: 2, Email: "op1@example.com", Status: "active", IsOperatorAdmin: true},
+		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	// Caller is uid 2, an Operator Admin (users.admin, no admins.manage).
+	token := mailAccountsToken(t, keys, 2, "users.admin")
+
+	rr := patchUser(t, h, token, 3, map[string]any{"status": "suspended"})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- an Operator Admin must not be able to suspend another Operator Admin, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUsersHandler_TopAdminCanSuspendAnOperatorAdmin(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	// Caller holds admins.manage -- the real Top Admin marker.
+	token := mailAccountsToken(t, keys, 1, "users.admin", "admins.manage")
+
+	rr := patchUser(t, h, token, 3, map[string]any{"status": "suspended"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 -- a Top Admin must be able to suspend an Operator Admin, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUsersHandler_OperatorAdminCannotGrantAdminTierRoles(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	token := mailAccountsToken(t, keys, 2, "users.admin") // Operator Admin, no admins.manage
+
+	rr := patchUser(t, h, token, 5, map[string]any{"is_operator_admin": true})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- an Operator Admin must not be able to grant admin-tier roles, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestUsersHandler_ProviderAdminCanOnlyToggleProviderRole(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active"},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	token := mailAccountsToken(t, keys, 6, "providers.manage") // Provider Admin, no users.admin
+
+	// Allowed: granting the Provider Operator role.
+	rr := patchUser(t, h, token, 7, map[string]any{"is_provider": true})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 -- a Provider Admin should be able to grant the provider role, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !seed[7].IsProvider {
+		t.Fatal("expected uid 7's IsProvider to be set after the grant")
+	}
+
+	// Forbidden: everything else, e.g. suspending the account.
+	rr2 := patchUser(t, h, token, 7, map[string]any{"status": "suspended"})
+	if rr2.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- a Provider Admin must not be able to change status, got %d: %s", rr2.Code, rr2.Body.String())
 	}
 }

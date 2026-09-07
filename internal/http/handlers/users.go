@@ -72,9 +72,16 @@ func (h *UsersHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		h.getUser(w, r, uid)
 	case http.MethodPatch:
-		h.requirePerm(w, r, "users.admin", func(w http.ResponseWriter, r *http.Request) {
+		// CP-HIPAA-2: a Provider Admin (providers.manage) can also reach this route -- the real,
+		// necessary way they grant/revoke the Provider Operator role on someone else. updateUser
+		// itself enforces which FIELDS a providers.manage-only caller (no users.admin) may touch
+		// (is_provider only) and which TARGETS anyone below Top Admin may touch (never another
+		// admin-tier account) -- see its own tier-guard logic.
+		if hasPermission(r, "users.admin") || hasPermission(r, "providers.manage") {
 			h.updateUser(w, r, uid)
-		})
+		} else {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		}
 	case http.MethodDelete:
 		h.requirePerm(w, r, "users.admin", func(w http.ResponseWriter, r *http.Request) {
 			h.deleteUser(w, r, uid)
@@ -211,10 +218,14 @@ type updateUserRequest struct {
 	// revokes admin on another user, gated the same as every other field here (this whole
 	// route already requires users.admin -- see ServeHTTP's own dispatch).
 	IsAdmin *bool `json:"is_admin,omitempty"`
-	// IsProvider -- CP-HIPAA-1: grants/revokes the least-privilege "provider" role
-	// (mail-accounts.provision only, not the rest of the admin permission set). Same gate as
-	// IsAdmin above -- this whole route already requires users.admin.
+	// IsProvider -- CP-HIPAA-1: grants/revokes the least-privilege "Provider Operator" role
+	// (mail-accounts.provision/sip-accounts.provision only). Settable by users.admin OR
+	// providers.manage (a Provider Admin) -- see updateUser's own tier-guard logic.
 	IsProvider *bool `json:"is_provider,omitempty"`
+	// IsOperatorAdmin / IsProviderAdmin -- CP-HIPAA-2, the 3rd/4th RBAC tiers. Granting either
+	// (like IsAdmin) requires admins.manage (Top Admin only) -- see updateUser's tier guard.
+	IsOperatorAdmin *bool `json:"is_operator_admin,omitempty"`
+	IsProviderAdmin *bool `json:"is_provider_admin,omitempty"`
 }
 
 func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid int) {
@@ -234,6 +245,40 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
+	}
+
+	// CP-HIPAA-2 tier guard. Real, load-bearing access-control logic -- see localUserPermissions'
+	// own doc comment for the full 4-tier model this enforces.
+	isTopAdmin := hasPermission(r, "admins.manage")
+	isUsersAdmin := hasPermission(r, "users.admin") // true for both Top and Operator Admin
+	isProviderAdmin := hasPermission(r, "providers.manage")
+
+	targetIsAdminTier := existing.LocalUID == 0 || existing.IsAdmin || existing.IsOperatorAdmin
+	if targetIsAdminTier && !isTopAdmin {
+		// Operator Admin cannot modify or disable another admin-tier account (Top or Operator) --
+		// the one real restriction the founder named directly ("mid level operator admins cant
+		// disable other operator admins"). A Provider Admin obviously can't reach an admin-tier
+		// account either.
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only a top admin can modify an admin-tier account"})
+		return
+	}
+
+	// Granting/revoking admin-tier roles themselves is Top-Admin-only, matching
+	// CP-SIP-ADMIN-124323's own "admin genesis" caution -- an Operator or Provider Admin cannot
+	// mint a new peer or promote anyone into the admin tiers.
+	if (req.IsAdmin != nil || req.IsOperatorAdmin != nil || req.IsProviderAdmin != nil) && !isTopAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only a top admin can grant or revoke an admin-tier role"})
+		return
+	}
+
+	// A Provider-Admin-only caller (providers.manage but not users.admin) may ONLY grant/revoke
+	// the Provider Operator role -- every other field here (email, password, status, and the
+	// admin-tier fields already checked above) is out of scope for that tier.
+	if isProviderAdmin && !isUsersAdmin {
+		if req.Email != nil || req.DisplayName != nil || req.Password != nil || req.Status != nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: a provider admin may only grant or revoke the provider role"})
+			return
+		}
 	}
 
 	operatorUID := operatorUIDFromContext(r)
@@ -348,7 +393,10 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
 	}
 
-	// Provider grant/revoke (CP-HIPAA-1). Same shape as the admin grant/revoke block above.
+	// Provider Operator grant/revoke (CP-HIPAA-1). Same shape as the admin grant/revoke block
+	// above. Reachable by users.admin OR providers.manage (a Provider Admin) -- see this
+	// function's own tier guard above for what else providers.manage is (and isn't) allowed to
+	// touch.
 	if req.IsProvider != nil {
 		payload, _ := json.Marshal(userlog.UserProviderChangedData{
 			LocalUID:   uid,
@@ -357,6 +405,52 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		ev := userlog.Event{
 			ID:          uuid.New().String(),
 			Type:        userlog.EventUserProviderChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
+	// Operator Admin grant/revoke (CP-HIPAA-2). Top-Admin-only -- already enforced above.
+	if req.IsOperatorAdmin != nil {
+		payload, _ := json.Marshal(userlog.UserOperatorAdminChangedData{
+			LocalUID:        uid,
+			IsOperatorAdmin: *req.IsOperatorAdmin,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserOperatorAdminChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
+	// Provider Admin grant/revoke (CP-HIPAA-2). Top-Admin-only -- already enforced above.
+	if req.IsProviderAdmin != nil {
+		payload, _ := json.Marshal(userlog.UserProviderAdminChangedData{
+			LocalUID:        uid,
+			IsProviderAdmin: *req.IsProviderAdmin,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserProviderAdminChanged,
 			Source:      "idunapro/api",
 			OccurredAt:  now,
 			OperatorUID: operatorUID,
@@ -391,6 +485,13 @@ func (h *UsersHandler) deleteUser(w http.ResponseWriter, r *http.Request, uid in
 		return
 	}
 
+	// CP-HIPAA-2 tier guard: an Operator Admin cannot delete another admin-tier account -- same
+	// restriction updateUser enforces for mutation, see localUserPermissions' own doc comment.
+	if (existing.IsAdmin || existing.IsOperatorAdmin) && !hasPermission(r, "admins.manage") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only a top admin can delete an admin-tier account"})
+		return
+	}
+
 	payload, _ := json.Marshal(userlog.UserDeletedData{LocalUID: uid})
 	ev := userlog.Event{
 		ID:          uuid.New().String(),
@@ -421,10 +522,12 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		"status":       u.Status,
 		// is_admin -- CP-SIP-ADMIN-124323: real, so an admin console can show who already
 		// holds admin without guessing from local_uid==0 alone.
-		"is_admin":    u.LocalUID == 0 || u.IsAdmin,
-		"is_provider": u.IsProvider,
-		"created_at":  u.CreatedAt.Format(time.RFC3339),
-		"updated_at":  u.UpdatedAt.Format(time.RFC3339),
+		"is_admin":          u.LocalUID == 0 || u.IsAdmin,
+		"is_operator_admin": u.IsOperatorAdmin,
+		"is_provider":       u.IsProvider,
+		"is_provider_admin": u.IsProviderAdmin,
+		"created_at":        u.CreatedAt.Format(time.RFC3339),
+		"updated_at":        u.UpdatedAt.Format(time.RFC3339),
 	}
 }
 

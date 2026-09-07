@@ -29,6 +29,7 @@ func newTestSipAccountsDB(t *testing.T) *sql.DB {
 		extension   VARCHAR(32) NOT NULL,
 		sip_server  VARCHAR(255) NOT NULL,
 		sip_port    INTEGER  NOT NULL DEFAULT 5060,
+		created_by  INTEGER,
 		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`)
@@ -333,5 +334,110 @@ func TestSipProvisioning_MintAndFetchRoundTrip(t *testing.T) {
 	fetchH.ServeHTTP(tamperedW, tamperedReq)
 	if tamperedW.Code == http.StatusOK {
 		t.Fatalf("tampered token was accepted -- real security bug")
+	}
+}
+
+// CP-HIPAA-2: sip-accounts.provision gets the same real minimum-necessary treatment as
+// mail-accounts.provision -- a provider can only provision/see/remove SIP accounts for
+// participants they themselves already manage.
+
+func newTestSipAccountsDBWithMailCreds(t *testing.T) *sql.DB {
+	t.Helper()
+	db := newTestSipAccountsDB(t)
+	if _, err := db.Exec(`CREATE TABLE mail_account_credentials (
+		id           INTEGER  PRIMARY KEY AUTOINCREMENT,
+		local_uid    INTEGER  NOT NULL UNIQUE,
+		email        VARCHAR(255) NOT NULL,
+		password_enc TEXT     NOT NULL,
+		created_by   INTEGER,
+		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatalf("create mail_account_credentials table: %v", err)
+	}
+	return db
+}
+
+func TestSipAccounts_ProviderCannotUpsertForUnrelatedParticipant(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDBWithMailCreds(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+	providerToken := sipAccountsSignToken(t, keys, 10, "sip-accounts.provision")
+
+	body, _ := json.Marshal(map[string]any{"extension": "2000", "sip_server": "198.58.107.85", "sip_port": 5060})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/999", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+providerToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 provisioning SIP for a participant the provider doesn't manage, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSipAccounts_ProviderCanProvisionForOwnParticipant(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDBWithMailCreds(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+	providerToken := sipAccountsSignToken(t, keys, 10, "sip-accounts.provision")
+
+	if _, err := db.Exec(`INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by) VALUES (100, 'p@example.test', 'enc', 10)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body, _ := json.Marshal(map[string]any{"extension": "2000", "sip_server": "198.58.107.85", "sip_port": 5060})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/100", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+providerToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 provisioning SIP for the provider's own participant, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSipAccounts_ListScopedToOwnCreations(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDBWithMailCreds(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by) VALUES (100, '2000', 'x', 5060, 10)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by) VALUES (200, '2001', 'x', 5060, 20)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	providerToken := sipAccountsSignToken(t, keys, 10, "sip-accounts.provision")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts", nil)
+	req.Header.Set("Authorization", "Bearer "+providerToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 SIP account (the provider's own), got %d: %+v", len(got), got)
+	}
+}
+
+func TestSipAccounts_RemoveScopedToOwnCreations(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDBWithMailCreds(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by) VALUES (200, '2001', 'x', 5060, 20)`); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	providerToken := sipAccountsSignToken(t, keys, 10, "sip-accounts.provision")
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/sip-accounts/200", nil)
+	req.Header.Set("Authorization", "Bearer "+providerToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 removing a SIP account created by a different provider, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

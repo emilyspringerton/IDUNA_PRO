@@ -21,15 +21,22 @@ import (
 // Dynamic per-user endpoint provisioning is real, separate, substantially bigger work, named
 // but not attempted here.
 //
+// CP-HIPAA-2 (founder real-time, 2026-09-07: "give the same treatment for sip [as mail
+// accounts]"): a caller holding sip-accounts.provision (Provider Operator or Provider Admin) can
+// also reach list/upsert/remove, scoped to the SIP accounts THEY created
+// (sip_accounts.created_by, mirroring mail_account_credentials' own real minimum-necessary
+// scoping). A provider-only caller may only upsert an extension for a uid they already provision
+// a mailbox or SIP account for -- never an arbitrary participant.
+//
 // Routes (all require Bearer JWT via middleware.RequireAuth):
 //
 //	GET             /api/v1/sip-accounts/me                 self, any authenticated caller
 //	GET             /api/v1/sip-accounts/me/qr               self, any authenticated caller -- QR onboarding payload
 //	GET             /api/v1/sip-accounts/me/provisioning-url  self, any authenticated caller -- see below
 //	GET             /api/v1/sip-accounts/me/webphone-credentials  self, any authenticated caller -- see below
-//	GET             /api/v1/sip-accounts                     list, requires users.admin
-//	PUT             /api/v1/sip-accounts/{uid}                upsert, requires users.admin
-//	DELETE          /api/v1/sip-accounts/{uid}                remove, requires users.admin
+//	GET             /api/v1/sip-accounts                     list, requires users.admin OR sip-accounts.provision (scoped)
+//	PUT             /api/v1/sip-accounts/{uid}                upsert, requires users.admin OR sip-accounts.provision (scoped)
+//	DELETE          /api/v1/sip-accounts/{uid}                remove, requires users.admin OR sip-accounts.provision (scoped)
 type SipAccountsHandler struct {
 	DB *sql.DB
 	// ProvisioningKey signs the capability tokens /me/provisioning-url mints. Real, deliberate
@@ -180,7 +187,7 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.requirePerm(w, r, "users.admin", h.list)
+		h.requireProvisionPerm(w, r, h.list)
 		return
 	}
 
@@ -191,11 +198,11 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		h.requirePerm(w, r, "users.admin", func(w http.ResponseWriter, r *http.Request) {
+		h.requireProvisionPerm(w, r, func(w http.ResponseWriter, r *http.Request) {
 			h.upsert(w, r, uid)
 		})
 	case http.MethodDelete:
-		h.requirePerm(w, r, "users.admin", func(w http.ResponseWriter, r *http.Request) {
+		h.requireProvisionPerm(w, r, func(w http.ResponseWriter, r *http.Request) {
 			h.remove(w, r, uid)
 		})
 	default:
@@ -205,6 +212,17 @@ func (h *SipAccountsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *SipAccountsHandler) requirePerm(w http.ResponseWriter, r *http.Request, perm string, next http.HandlerFunc) {
 	if !hasPermission(r, perm) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	next(w, r)
+}
+
+// requireProvisionPerm -- CP-HIPAA-2: the admin routes below are reachable by users.admin OR
+// sip-accounts.provision (Provider Operator/Admin); each handler function applies its own
+// minimum-necessary scoping for a provider-only caller (see list/upsert/remove below).
+func (h *SipAccountsHandler) requireProvisionPerm(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	if !hasPermission(r, "users.admin") && !hasPermission(r, "sip-accounts.provision") {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
@@ -336,8 +354,23 @@ func (h *SipAccountsHandler) getMineWebphoneCredentials(w http.ResponseWriter, r
 }
 
 func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
-	rows, err := h.DB.QueryContext(r.Context(),
-		`SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts ORDER BY local_uid`)
+	// CP-HIPAA-2 minimum-necessary scoping: a provider-only caller (no users.admin) sees only
+	// the SIP accounts THEY created -- same real principle mail_accounts.go's own list already
+	// enforces.
+	query := `SELECT local_uid, extension, sip_server, sip_port, updated_at FROM sip_accounts`
+	args := []any{}
+	if !hasPermission(r, "users.admin") {
+		callerUID := callerLocalUID(r)
+		if callerUID == nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		query += ` WHERE created_by = ?`
+		args = append(args, *callerUID)
+	}
+	query += ` ORDER BY local_uid`
+
+	rows, err := h.DB.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -376,16 +409,28 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 	if req.SipPort == 0 {
 		req.SipPort = 5060
 	}
+
+	callerUID := operatorUIDFromContext(r)
+	if !hasPermission(r, "users.admin") {
+		// CP-HIPAA-2: a provider-only caller may only upsert a SIP extension for a participant
+		// they already provision -- either an existing SIP account they created, or a mailbox
+		// they created (mail_account_credentials.created_by). Never an arbitrary uid.
+		if !h.callerProvisionsParticipant(r, callerUID, uid) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: you may only provision SIP for a participant you already manage"})
+			return
+		}
+	}
+
 	now := time.Now().UTC()
 	_, err := h.DB.ExecContext(r.Context(), `
-		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			extension = excluded.extension,
 			sip_server = excluded.sip_server,
 			sip_port = excluded.sip_port,
 			updated_at = excluded.updated_at
-	`, uid, req.Extension, req.SipServer, req.SipPort, now)
+	`, uid, req.Extension, req.SipServer, req.SipPort, callerUID, now)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -399,8 +444,38 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 	writeJSON(w, http.StatusOK, acct)
 }
 
+// callerProvisionsParticipant -- CP-HIPAA-2: true if callerUID already provisions uid's mailbox
+// or SIP account (i.e. this participant is genuinely "theirs"), false otherwise. A provider-only
+// caller with no existing relationship to uid can't bootstrap one via SIP upsert.
+func (h *SipAccountsHandler) callerProvisionsParticipant(r *http.Request, callerUID, uid int) bool {
+	var count int
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM sip_accounts WHERE local_uid = ? AND created_by = ?`, uid, callerUID,
+	).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	if err := h.DB.QueryRowContext(r.Context(),
+		`SELECT COUNT(*) FROM mail_account_credentials WHERE local_uid = ? AND created_by = ?`, uid, callerUID,
+	).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	return false
+}
+
 func (h *SipAccountsHandler) remove(w http.ResponseWriter, r *http.Request, uid int) {
-	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM sip_accounts WHERE local_uid = ?`, uid)
+	query := `DELETE FROM sip_accounts WHERE local_uid = ?`
+	args := []any{uid}
+	if !hasPermission(r, "users.admin") {
+		// CP-HIPAA-2: a provider-only caller can only remove a SIP account THEY created.
+		callerUID := callerLocalUID(r)
+		if callerUID == nil {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		query += ` AND created_by = ?`
+		args = append(args, *callerUID)
+	}
+	res, err := h.DB.ExecContext(r.Context(), query, args...)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

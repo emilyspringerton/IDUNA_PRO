@@ -1,0 +1,27 @@
+-- CP-HIPAA-2 (founder real-time, 2026-09-07: "the top admins at carepyre can disable admins but
+-- mid level operator admins cant disable other operator admins etc - but really the providers
+-- need the provider admin and the provider operators who can provision if that make sense - so
+-- its like a 3 or 4 layer model to start with").
+--
+-- Extends the existing 2-tier is_admin/is_provider model (CP-SIP-ADMIN-124323, CP-HIPAA-1) to a
+-- real 4-tier hierarchy:
+--
+--   1. Top Admin       (is_admin, unchanged -- uid=0 always included)  -- unrestricted; the only
+--      tier that can modify/disable another admin-tier account (top OR operator).
+--   2. Operator Admin   (is_operator_admin, NEW)                       -- same practical
+--      permission set as Top Admin, EXCEPT cannot modify or disable another admin-tier account
+--      (peer Operator Admins or Top Admins) -- enforced via a new "admins.manage" permission
+--      only Top Admin actually carries (see localUserPermissions in internal/http/handlers/
+--      local_auth.go).
+--   3. Provider Admin   (is_provider_admin, NEW)                       -- can provision mailboxes/
+--      SIP accounts themselves (same as Provider Operator) AND grant/revoke the Provider Operator
+--      role on other users (new "providers.manage" permission). Granting/revoking Provider Admin
+--      itself stays Top-Admin-only, same caution as granting Top/Operator Admin.
+--   4. Provider Operator (is_provider, CP-HIPAA-1, unchanged)          -- provision-only, scoped
+--      to participants they themselves created.
+--
+-- Same DB-backed bool / grant-event / PATCH-API pattern is_admin/is_provider already established
+-- -- no chicken-and-egg genesis problem for either new tier, granting always requires an
+-- existing Top Admin.
+ALTER TABLE local_users ADD COLUMN is_operator_admin INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE local_users ADD COLUMN is_provider_admin INTEGER NOT NULL DEFAULT 0;

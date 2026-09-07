@@ -30,8 +30,17 @@ type LocalUser struct {
 	// established, no separate genesis mechanism needed since granting it always requires an
 	// existing users.admin holder.
 	IsProvider bool
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// IsOperatorAdmin / IsProviderAdmin -- CP-HIPAA-2, the real 3rd/4th tiers of the RBAC
+	// hierarchy (see 202609070004_local_users_tiered_admin_roles.sql for the full model).
+	// IsOperatorAdmin: same practical permission set as IsAdmin, except cannot modify/disable
+	// another admin-tier account (enforced via the "admins.manage" permission, which only
+	// IsAdmin/uid=0 actually carries -- see localUserPermissions).
+	// IsProviderAdmin: provisions like IsProvider, plus can grant/revoke IsProvider on others
+	// (the "providers.manage" permission).
+	IsOperatorAdmin bool
+	IsProviderAdmin bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // UserProjector is the interface both SQLite and MySQL projectors implement.
@@ -85,6 +94,10 @@ const (
 	// EventUserProviderChanged -- CP-HIPAA-1. Same grant/revoke-in-one-event-type shape as
 	// EventUserAdminChanged.
 	EventUserProviderChanged = "local_user.provider_changed"
+	// EventUserOperatorAdminChanged / EventUserProviderAdminChanged -- CP-HIPAA-2, the 3rd/4th
+	// RBAC tiers. Same grant/revoke-in-one-event-type shape as the two above.
+	EventUserOperatorAdminChanged = "local_user.operator_admin_changed"
+	EventUserProviderAdminChanged = "local_user.provider_admin_changed"
 )
 
 // ── event payload types ──────────────────────────────────────────────────────
@@ -121,6 +134,16 @@ type UserAdminChangedData struct {
 type UserProviderChangedData struct {
 	LocalUID   int  `json:"local_uid"`
 	IsProvider bool `json:"is_provider"`
+}
+
+type UserOperatorAdminChangedData struct {
+	LocalUID        int  `json:"local_uid"`
+	IsOperatorAdmin bool `json:"is_operator_admin"`
+}
+
+type UserProviderAdminChangedData struct {
+	LocalUID        int  `json:"local_uid"`
+	IsProviderAdmin bool `json:"is_provider_admin"`
 }
 
 type UserDeletedData struct {

@@ -124,6 +124,27 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // way to grant it to the two local accounts that actually exist
 // (uid=0 webmaster, and uid=1) without inventing a second, parallel
 // grant UI for a one-account, interim need.
+// CP-HIPAA-2 (founder real-time, 2026-09-07: "the top admins at carepyre can disable admins but
+// mid level operator admins cant disable other operator admins etc - but really the providers
+// need the provider admin and the provider operators who can provision ... so its like a 3 or 4
+// layer model"). The real 4-tier hierarchy:
+//
+//  1. Top Admin (uid=0 or IsAdmin) -- everything below, PLUS "admins.manage": the one permission
+//     that lets a caller modify or disable another admin-tier account (Top or Operator). This is
+//     the tier distinction the founder asked for -- Operator Admin gets every OTHER admin
+//     capability but never this one.
+//  2. Operator Admin (IsOperatorAdmin) -- the exact same practical permission set as Top Admin,
+//     minus "admins.manage". Can manage every ordinary/provider-tier user, but users.go's own
+//     updateUser/deleteUser refuse any mutation whose TARGET is itself Top or Operator Admin
+//     unless the caller holds "admins.manage".
+//  3. Provider Admin (IsProviderAdmin) -- provisions mailboxes/SIP accounts like a Provider
+//     Operator (mail-accounts.provision, sip-accounts.provision), PLUS "providers.manage": can
+//     grant/revoke the Provider Operator role on other users. Granting/revoking Provider Admin
+//     itself stays Top-Admin-only (users.go gates is_provider_admin on "admins.manage"), the same
+//     caution CP-SIP-ADMIN-124323 already applies to granting admin itself.
+//  4. Provider Operator (IsProvider, CP-HIPAA-1) -- provision-only
+//     (mail-accounts.provision, sip-accounts.provision), scoped server-side to participants they
+//     themselves created.
 func localUserPermissions(u *userlog.LocalUser) []string {
 	// CP-SIP-ADMIN-124323 ("admin genesis"): u.IsAdmin is the real, general, DB-backed grant
 	// path -- uid=0 (webmaster) still always gets this same set automatically (backward
@@ -131,47 +152,68 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 	// ONLY way in. See the LocalUser.IsAdmin field's own doc comment for how a grant actually
 	// happens (idunapro admin-grant <email> for the first one, the real API after that).
 	if u.LocalUID == 0 || u.IsAdmin {
-		return []string{
-			"iduna.admin",
-			"iduna.me.read",
-			"users.admin",
-			"apples.read",
-			"apples.write",
-			"drive.read",
-			"drive.write",
-			"subscriptions.admin",
-			"devportal.access",
-			// kanban.access -- real, found-live gap (2026-09-04, while building `idunapro
-			// kanban list`, cruise-queue card 9988): the bearer-token kanban API
-			// (main.go's own `RequirePermission("kanban.access")`) had no real grant path
-			// for ANY local user at all, webmaster included -- only a Google-OAuth user
-			// with a DB role row could ever reach it. Added here for uid=0, matching this
-			// function's own established "the two local accounts that actually exist" grant
-			// pattern (devportal.access got the same treatment 2026-08-28). Whether
-			// non-webmaster local users should also get it is a real, separate,
-			// founder-level product question (kanban's own real "human/agent interop"
-			// framing suggests yes eventually) -- not decided here.
-			"kanban.access",
-			// twilio.admin -- CP-SIP-242414/TWILLIO-API-124 ("we can do all of the operations
-			// from the carepyre console side... user roles iam etc"). A real, separate
-			// permission from users.admin (not folded into it) since Twilio operations are a
-			// genuinely distinct capability an admin might not want every users.admin holder to
-			// have -- same "the two local accounts that actually exist" grant pattern this
-			// function already establishes for devportal.access/kanban.access.
-			"twilio.admin",
-		}
+		return append(operatorAdminPermissions(),
+			// admins.manage -- CP-HIPAA-2: the one permission Operator Admin never gets. Gates
+			// every mutation (status/password/role-flag change, delete) whose TARGET is itself
+			// Top or Operator Admin -- see users.go's own tierGuard.
+			"admins.manage",
+		)
+	}
+	if u.IsOperatorAdmin {
+		return operatorAdminPermissions()
 	}
 	base := []string{"iduna.me.read", "users.read.self", "devportal.access"}
-	// mail-accounts.provision -- CP-HIPAA-1 ("we can allow providers to create email accounts
-	// for participants"). A real, least-privilege grant distinct from the full admin set above:
-	// a provider can provision/manage participant mailboxes (MailAccountsHandler) but gets none
-	// of users.admin's other console-wide capabilities (kanban, mailing list, Twilio, user
-	// management itself). Same "the two local accounts that actually exist" DB-backed grant
-	// pattern IsAdmin already established, via IsProvider/EventUserProviderChanged.
-	if u.IsProvider {
-		base = append(base, "mail-accounts.provision")
+	// mail-accounts.provision / sip-accounts.provision -- CP-HIPAA-1/CP-HIPAA-2 ("we can allow
+	// providers to create email accounts for participants" / "give the same treatment for
+	// sip"). A real, least-privilege grant distinct from the admin tiers above: a provider can
+	// provision/manage participant mailboxes and SIP extensions (MailAccountsHandler,
+	// SipAccountsHandler) but gets none of users.admin's other console-wide capabilities
+	// (kanban, mailing list, Twilio, user management itself).
+	if u.IsProviderAdmin {
+		base = append(base, "mail-accounts.provision", "sip-accounts.provision",
+			// providers.manage -- CP-HIPAA-2: lets a Provider Admin grant/revoke IsProvider
+			// (Provider Operator) on other users -- see users.go's own updateUser. Granting
+			// Provider ADMIN itself stays admins.manage-gated (Top Admin only), same caution as
+			// granting Top/Operator Admin.
+			"providers.manage")
+	} else if u.IsProvider {
+		base = append(base, "mail-accounts.provision", "sip-accounts.provision")
 	}
 	return base
+}
+
+// operatorAdminPermissions is the full admin capability set MINUS admins.manage -- shared by
+// both Top Admin (which adds admins.manage on top) and Operator Admin (which never gets it).
+func operatorAdminPermissions() []string {
+	return []string{
+		"iduna.admin",
+		"iduna.me.read",
+		"users.admin",
+		"apples.read",
+		"apples.write",
+		"drive.read",
+		"drive.write",
+		"subscriptions.admin",
+		"devportal.access",
+		// kanban.access -- real, found-live gap (2026-09-04, while building `idunapro
+		// kanban list`, cruise-queue card 9988): the bearer-token kanban API
+		// (main.go's own `RequirePermission("kanban.access")`) had no real grant path
+		// for ANY local user at all, webmaster included -- only a Google-OAuth user
+		// with a DB role row could ever reach it. Added here for uid=0, matching this
+		// function's own established "the two local accounts that actually exist" grant
+		// pattern (devportal.access got the same treatment 2026-08-28). Whether
+		// non-webmaster local users should also get it is a real, separate,
+		// founder-level product question (kanban's own real "human/agent interop"
+		// framing suggests yes eventually) -- not decided here.
+		"kanban.access",
+		// twilio.admin -- CP-SIP-242414/TWILLIO-API-124 ("we can do all of the operations
+		// from the carepyre console side... user roles iam etc"). A real, separate
+		// permission from users.admin (not folded into it) since Twilio operations are a
+		// genuinely distinct capability an admin might not want every users.admin holder to
+		// have -- same "the two local accounts that actually exist" grant pattern this
+		// function already establishes for devportal.access/kanban.access.
+		"twilio.admin",
+	}
 }
 
 func itoa(n int) string {
