@@ -159,9 +159,12 @@ func (h *GoogleAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   3600,
 	})
 
+	// PII minimization, founder real-time 2026-09-08: "drop email, keep local_uid" (same
+	// decision applied here to Google-auth's own sub, for consistency across every login surface
+	// in this service) -- sub alone is still enough to correlate/investigate internally without
+	// scattering plaintext emails into a log store shared with unrelated products.
 	emitAuthEvent(r.Context(), h.EventLog, "iduna:auth.google.success", "iduna-auth", map[string]any{
-		"sub":   user.IDString,
-		"email": user.Email,
+		"sub": user.IDString,
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":      true,

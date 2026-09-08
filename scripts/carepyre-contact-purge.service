@@ -1,0 +1,21 @@
+# CarePyre contact-submission retention purge -- user-level systemd unit (no sudo required).
+# Oneshot: runs cmd/carepyre-contact-purge once, triggered on a schedule by
+# carepyre-contact-purge.timer, not run continuously. Deletes submissions resolved 90+ days ago;
+# never touches anything still status="new". See that tool's own doc comment for the full design.
+#
+# Deploy:
+#   go build -o ~/.local/bin/carepyre-contact-purge ./cmd/carepyre-contact-purge
+#   cp scripts/carepyre-contact-purge.service scripts/carepyre-contact-purge.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now carepyre-contact-purge.timer
+
+[Unit]
+Description=CarePyre contact-submission retention purge (90 days post-resolution)
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/fatbaby/IDUNA_PRO
+ExecStart=/home/fatbaby/.local/bin/carepyre-contact-purge
+StandardOutput=append:/home/fatbaby/EMILY/var/logs/carepyre-contact-purge.log
+StandardError=append:/home/fatbaby/EMILY/var/logs/carepyre-contact-purge.log

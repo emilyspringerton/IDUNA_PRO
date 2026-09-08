@@ -297,6 +297,21 @@ func main() {
 		AllowOrigin: mailingListAllowOrigin,
 		Limiter:     middleware.NewIPRateLimiter(5),
 	}
+	// CarePyre contact form -- moved here from plain IDUNA (founder real-time, 2026-09-08: "move
+	// the contact form to idunapro"). CAREPYRE_CONTACT_ALLOW_ORIGIN mirrors
+	// MAILING_LIST_ALLOW_ORIGIN's own env-driven CORS pattern rather than hardcoding
+	// carepyre.org, matching this repo's own "no EINHORN-specific hardcoding" convention
+	// (see the mailing-list generalization note in CHANGELOG.md, 2026-09-05).
+	var carepyreContactAllowOrigin []string
+	if raw := os.Getenv("CAREPYRE_CONTACT_ALLOW_ORIGIN"); raw != "" {
+		carepyreContactAllowOrigin = strings.Split(raw, ",")
+	}
+	carepyreContactH := &handlers.CarePyreContactHandler{
+		DB:          db,
+		AllowOrigin: carepyreContactAllowOrigin,
+		Limiter:     middleware.NewIPRateLimiter(5),
+	}
+
 	if keyFilePath := os.Getenv("MAILING_LIST_KEY_FILE"); keyFilePath != "" {
 		if err := mailingListAutoUnlock(mailingListStore, mailingListVault, keyFilePath); err != nil {
 			log.Fatalf("mailinglist: file-key auto-unlock failed: %v", err)
@@ -414,6 +429,16 @@ func main() {
 	kanbanAPIProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("kanban.access")(kanbanH))
 	mux.Handle("/api/v1/kanban/cards", kanbanAPIProtected)
 	mux.Handle("/api/v1/kanban/cards/", kanbanAPIProtected)
+
+	// CarePyre contact form -- public submit route (no auth, CORS+rate-limited) plus admin
+	// list/resolve/delete routes gated on contacts.manage (Top Admin only, see
+	// localUserPermissions). The admin surface does its own permission check inside ServeHTTP
+	// (same pattern mailAccountsH already establishes), so it only needs RequireAuth here, not
+	// RequirePermission too.
+	carepyreContactH.RegisterPublic(mux)
+	carepyreContactProtected := middleware.RequireAuth(keys)(carepyreContactH)
+	mux.Handle("/api/v1/carepyre/contact-submissions", carepyreContactProtected)
+	mux.Handle("/api/v1/carepyre/contact-submissions/", carepyreContactProtected)
 
 	// Mailing-list routes — see this file's own wiring comment above.
 	mailingListH.Register(mux)

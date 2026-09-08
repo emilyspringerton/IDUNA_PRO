@@ -44,6 +44,11 @@ RestartSec=10
 StandardOutput=journal
 StandardError=journal
 
+# Founder real-time, 2026-09-08 (PII audit): var/*.db defaulted to world-readable (no explicit
+# UMask meant the process inherited whatever umask its parent happened to have). 0027 means new
+# files are created owner rw, group r, other nothing -- SQLite's own DB/-wal/-shm files included.
+UMask=0027
+
 # Resource limits -- same real ceiling IDUNA's own unit uses; IDUNA_PRO's real, current
 # footprint (embedded SQLite, no heavier dependents yet) fits comfortably under it.
 MemoryMax=256M

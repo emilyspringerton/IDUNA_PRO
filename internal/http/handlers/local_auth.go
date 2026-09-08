@@ -60,16 +60,24 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user == nil || user.Status == "deleted" || user.Status == "suspended" {
+		// PII minimization, founder real-time 2026-09-08: this event log is shared across
+		// unrelated products (REDGARDEN, GFD, etc.), not CarePyre-scoped, so it no longer carries
+		// the raw email. There's no local_uid to log here either (the email didn't resolve to a
+		// live account) -- the event type itself ("failure") is the whole signal.
 		emitAuthEvent(r.Context(), h.EventLog, "iduna:auth.local.failure", "iduna-auth", map[string]any{
-			"email": req.Email,
+			"reason": "unknown_or_inactive_user",
 		})
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
+		// PII minimization, founder real-time 2026-09-08 -- see the branch above. local_uid is
+		// available here (the account exists), so it's used instead of the raw email for
+		// correlation.
 		emitAuthEvent(r.Context(), h.EventLog, "iduna:auth.local.failure", "iduna-auth", map[string]any{
-			"email": req.Email,
+			"local_uid": user.LocalUID,
+			"reason":    "bad_password",
 		})
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
@@ -101,9 +109,11 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PII minimization, founder real-time 2026-09-08: "drop email, keep local_uid" -- local_uid
+	// alone is still enough to correlate/investigate internally without scattering plaintext
+	// emails into a log store shared with unrelated products.
 	emitAuthEvent(r.Context(), h.EventLog, "iduna:auth.local.success", "iduna-auth", map[string]any{
 		"local_uid": user.LocalUID,
-		"email":     user.Email,
 	})
 	writeJSON(w, http.StatusOK, localAuthResponse{
 		Token:     token,
@@ -161,6 +171,15 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 			// every mutation (status/password/role-flag change, delete) whose TARGET is itself
 			// Top or Operator Admin -- see users.go's own tierGuard.
 			"admins.manage",
+			// contacts.manage -- founder real-time, 2026-09-08: "make the top admin have access
+			// to the contact form and then support iam roles." Gates
+			// CarePyreContactHandler's admin routes (list/resolve/delete carepyre.org contact
+			// submissions). Deliberately real and separately named, not folded into
+			// operatorAdminPermissions() -- Top-Admin-only for now, the same scoping precedent
+			// admins.manage itself already sets, so extending it to Operator Admin (or a new
+			// Provider-tier role) later is a one-line move into a different function, not a
+			// rewrite of this gate.
+			"contacts.manage",
 		)
 	}
 	if u.IsOperatorAdmin {

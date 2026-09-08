@@ -1,0 +1,14 @@
+# Runs carepyre-contact-purge.service once a day. The service itself is idempotent (a run that
+# finds nothing overdue is a no-op), and the real retention window is 90 days, so daily cadence
+# is more than enough precision -- no need for anything tighter.
+
+[Unit]
+Description=Daily timer for CarePyre contact-submission retention purge
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
