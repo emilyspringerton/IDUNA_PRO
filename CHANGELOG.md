@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-08
+
+- PII audit follow-up: CarePyre contact form moved here from plain IDUNA, gated by new contacts.manage permission (Top Admin only); 90-day post-resolution retention purge job (cmd/carepyre-contact-purge + systemd timer); local-auth and Google-auth event log entries no longer carry plaintext email, local_uid/sub only; var/*.db file permissions fixed to 640 + UMask=0027 on the service unit (sess-20260905-0720-ec33e7c5)
+
+
 ## 2026-09-07
 - Provisioned and promoted the first real CarePyre admin account for garybifrost@gmail.com via the existing register + cmd/admin-grant flow. (sess-20260905-0720-ec33e7c5)
 - SAGA audit: README/CLAUDE.md catch-up (organizations, branding, compliance-recording, GDPR, RBAC). (sess-20260905-0720-ec33e7c5)
