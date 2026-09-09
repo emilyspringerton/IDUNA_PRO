@@ -140,6 +140,54 @@ func TestCommunityToolsHandler_PutThenGetRoundTrips(t *testing.T) {
 	}
 }
 
+// TestCommunityToolsHandler_NewOngoingWorkEntrySortsToTop -- the real, exact bug report (kanban
+// card CVB-12434, founder real-time): "the work history needs to auto sort i put a new one
+// 2006-present and it went to the bottom of the resume instead of the top." Reproduces the
+// REAL reported sequence through the real, live HTTP handlers, not just the internal/resume
+// package's own unit tests: save a master resume with two already-ended jobs, then add a new
+// ongoing one via the real single-entry POST primitive (the most likely real path someone
+// "adding one more job" actually takes), and confirm GET reflects it sorted to the top.
+func TestCommunityToolsHandler_NewOngoingWorkEntrySortsToTop(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	work := newTestCommunityToolsWorkHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	body, _ := json.Marshal(resume.Resume{
+		Basics: resume.Basics{Name: "Jordan Rivera"},
+		Work: []resume.Work{
+			{Name: "Old Co", StartDate: "2010-01", EndDate: "2015-01"},
+			{Name: "Newer Co", StartDate: "2015-02", EndDate: "2020-01"},
+		},
+	})
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/community-tools/resume", bytes.NewReader(body))
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	crud.ServeHTTP(httptest.NewRecorder(), putReq)
+
+	createBody, _ := json.Marshal(map[string]string{"name": "Current Co", "position": "Engineer", "startDate": "2006"})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/resume/work", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createRR := httptest.NewRecorder()
+	work.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusCreated {
+		t.Fatalf("POST work: expected 201, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRR := httptest.NewRecorder()
+	crud.ServeHTTP(getRR, getReq)
+	var res resume.Resume
+	json.Unmarshal(getRR.Body.Bytes(), &res)
+	if len(res.Work) != 3 {
+		t.Fatalf("expected 3 work entries, got %d", len(res.Work))
+	}
+	if res.Work[0].Name != "Current Co" {
+		t.Fatalf("expected the new ongoing entry to sort to the TOP, not the bottom, got order: %s, %s, %s",
+			res.Work[0].Name, res.Work[1].Name, res.Work[2].Name)
+	}
+}
+
 func TestCommunityToolsHandler_PutIsScopedToCallerOwnUID(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	crud, _, _, _, _ := newTestCommunityToolsHandlers(t, keys)

@@ -802,7 +802,14 @@ func loadResume(ctx context.Context, db *sql.DB, uid int) (*resume.Resume, error
 	return &res, nil
 }
 
+// saveResume is the one real, shared persistence choke point every write path reduces to (the
+// whole-document PUT and every single-entry POST/PATCH/DELETE primitive) -- resume.SortByRecency
+// runs here, once, so Work/Education/Awards are always stored in the real, standard
+// most-recent-first order regardless of which API surface made the edit (kanban card CVB-12434,
+// founder real-time: "the work history needs to auto sort i put a new one 2006-present and it
+// went to the bottom of the resume instead of the top").
 func saveResume(ctx context.Context, db *sql.DB, uid int, res *resume.Resume) error {
+	resume.SortByRecency(res)
 	raw, err := json.Marshal(res)
 	if err != nil {
 		return err
