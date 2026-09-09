@@ -1,0 +1,1251 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CarePyre Community Tools -- Resume/CV Builder API",
+    "version": "1.0.0",
+    "description": "Real, machine-readable primitives over a user's own master resume (JSON Resume-shaped) and their named, bespoke Target resume variants -- built so an autonomous agent can bootstrap understanding of this API without reading Go source. Founder real-time, 2026-09-09: \"ensure that all of the features we have have good api because i am going to ask agents to work with those primitives to start intelligently managing the resume using agentic ai.\"\nEvery route below (except this document itself) requires a Bearer JWT carrying the `community-tools.access` permission, which is itself driven by a plain, per-account feature flag (`LocalUser.IsCommunityToolsEnabled`) -- not tied to any admin/provider tier. A caller can only ever read/write their OWN resume and targets; there is no cross-user admin-override path for this feature.\nTwo real update styles exist side by side: whole-document PUT (the original v0 shape -- simple, but an agent making one small edit must fetch, mutate, and resend everything) and real per-field/per-entry PATCH/POST/DELETE primitives (added specifically for agent ergonomics). Prefer the PATCH-style primitives for small, targeted edits.\nPATCH semantics: the request body only needs to include the fields being changed. A JSON key ABSENT from the body leaves that field's existing value untouched. A key PRESENT (including an explicit \"\" or []) overwrites it. For Target's own `summary_override`/ `label_override` fields specifically, an explicit `null` clears the override (a real, deliberate \"stop overriding this\" action) -- this is a genuine three-way distinction (absent / null / a real value), not just two.\n"
+  },
+  "servers": [
+    {
+      "url": "/api/v1/community-tools"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/resume": {
+      "get": {
+        "operationId": "getResume",
+        "summary": "Fetch the caller's own master resume",
+        "description": "Returns a real, valid, empty JSON Resume shell if the caller hasn't saved one yet -- never a 404. An empty resume is a valid starting state.\n",
+        "responses": {
+          "200": {
+            "description": "The caller's own resume document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resume"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceResume",
+        "summary": "Replace the caller's entire resume document",
+        "description": "Whole-document replace. Any Work/Education/Skill/Award entry missing an `id` gets one server-assigned; an entry that already has an `id` keeps it. Prefer PATCH /resume/basics or the per-entry POST/PATCH/DELETE routes below for a small, targeted edit -- this route resends and re-persists the ENTIRE document every time.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Resume"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The saved resume, with server-assigned IDs filled in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resume"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/basics": {
+      "patch": {
+        "operationId": "patchBasics",
+        "summary": "Partially update just the Basics section",
+        "description": "Merges the given fields onto the existing Basics -- every Work/Education/Skill/Award entry is left completely untouched. The most efficient primitive for e.g. fixing a phone number or tweaking the summary.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Basics"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The full resume after the merge",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resume"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/verify": {
+      "post": {
+        "operationId": "verifyResume",
+        "summary": "Run itemized ATS-readability verification against the master resume",
+        "description": "Real, itemized, named-rule results -- never a single opaque score. Built for exactly the \"verify, see which specific rule failed, fix it, re-verify\" loop an agent would run.\n",
+        "responses": {
+          "200": {
+            "description": "Itemized verification result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/export.pdf": {
+      "get": {
+        "operationId": "exportResumePDF",
+        "summary": "Download a real, ATS-safe PDF of the master resume",
+        "description": "A plain, single-column, genuinely selectable-text PDF (never an image). The response Content-Disposition header carries the real, sanitized filename to use.\n",
+        "responses": {
+          "200": {
+            "description": "A real PDF file",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/work": {
+      "post": {
+        "operationId": "createWorkEntry",
+        "summary": "Add one new Work entry",
+        "description": "A fresh server-assigned `id` is returned; any `id` sent in the body is ignored.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Work"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created entry, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Work"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/work/{id}": {
+      "patch": {
+        "operationId": "patchWorkEntry",
+        "summary": "Partially update one Work entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Work"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Work"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteWorkEntry",
+        "summary": "Remove one Work entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/education": {
+      "post": {
+        "operationId": "createEducationEntry",
+        "summary": "Add one new Education entry",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Education"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created entry, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Education"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/education/{id}": {
+      "patch": {
+        "operationId": "patchEducationEntry",
+        "summary": "Partially update one Education entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Education"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Education"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteEducationEntry",
+        "summary": "Remove one Education entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/skills": {
+      "post": {
+        "operationId": "createSkillEntry",
+        "summary": "Add one new Skill entry",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Skill"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created entry, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/skills/{id}": {
+      "patch": {
+        "operationId": "patchSkillEntry",
+        "summary": "Partially update one Skill entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Skill"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Skill"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteSkillEntry",
+        "summary": "Remove one Skill entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/awards": {
+      "post": {
+        "operationId": "createAwardEntry",
+        "summary": "Add one new Award entry",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Award"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created entry, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Award"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/awards/{id}": {
+      "patch": {
+        "operationId": "patchAwardEntry",
+        "summary": "Partially update one Award entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Award"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Award"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteAwardEntry",
+        "summary": "Remove one Award entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/targets": {
+      "get": {
+        "operationId": "listTargets",
+        "summary": "List the caller's own saved Target resume variants",
+        "responses": {
+          "200": {
+            "description": "The caller's own targets (empty array if none saved yet)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Target"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceTargets",
+        "summary": "Replace the caller's entire target list",
+        "description": "Whole-list replace: an entry with no `id` is created, one with an existing `id` is edited in place, and an id from the OLD list simply absent from the new one is deleted. Prefer POST /resume/targets (create one) or PATCH/DELETE /resume/targets/{id} for a single, targeted change -- this route resends and re-persists the ENTIRE list.\n",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The saved target list, with server-assigned IDs filled in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Target"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createTarget",
+        "summary": "Add one new Target resume variant",
+        "description": "A fresh server-assigned `id` is returned; any `id` sent in the body is ignored.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Target"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created target, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/targets/{id}": {
+      "patch": {
+        "operationId": "patchTarget",
+        "summary": "Partially update one Target by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Target"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated target",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Target"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteTarget",
+        "summary": "Remove one Target by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/targets/{id}/resolved": {
+      "get": {
+        "operationId": "getResolvedTarget",
+        "summary": "Fetch the real, filtered resume view a Target resolves to",
+        "description": "Applies the target's own included-id selections and summary/label overrides on top of the master resume. Basics passes through unfiltered except for the two real overrides.\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The resolved resume view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Resume"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/targets/{id}/verify": {
+      "post": {
+        "operationId": "verifyTarget",
+        "summary": "Run itemized verification against a target's own RESOLVED view",
+        "description": "Verifies the RESOLVED view, not the master -- a target that hides every work entry can genuinely fail has-work-or-education even when the master resume itself passes.\n",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Itemized verification result for this target's resolved view",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/resume/targets/{id}/export.pdf": {
+      "get": {
+        "operationId": "exportTargetPDF",
+        "summary": "Download a real, ATS-safe PDF of a target's resolved view",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/TargetId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A real PDF file",
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "parameters": {
+      "EntryId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The stable, server-assigned id of one Work/Education/Skill/Award entry."
+      },
+      "TargetId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "The stable, server-assigned id of one saved Target."
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid JSON in the request body",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Missing or invalid bearer token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The caller's account does not have community-tools.access",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No entry/target exists with the given id",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Deleted": {
+        "description": "The entry/target was removed",
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "deleted": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "Resume": {
+        "type": "object",
+        "description": "A direct, field-for-field mirror of the real JSON Resume schema (jsonresume.org).",
+        "properties": {
+          "basics": {
+            "$ref": "#/components/schemas/Basics"
+          },
+          "work": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Work"
+            }
+          },
+          "education": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Education"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Skill"
+            }
+          },
+          "awards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Award"
+            }
+          }
+        }
+      },
+      "Basics": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "image": {
+            "type": "string"
+          },
+          "location": {
+            "type": "object",
+            "properties": {
+              "address": {
+                "type": "string"
+              },
+              "postalCode": {
+                "type": "string"
+              },
+              "city": {
+                "type": "string"
+              },
+              "countryCode": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              }
+            }
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "network": {
+                  "type": "string"
+                },
+                "username": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Work": {
+        "type": "object",
+        "description": "A CarePyre extension beyond strict JSON Resume: `id` is a stable, server-assigned identifier a Target can reference (jsonresume.org's own schema has no such field).\n",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "name": {
+            "type": "string",
+            "description": "The employer's name."
+          },
+          "position": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "startDate": {
+            "type": "string",
+            "description": "YYYY, YYYY-MM, or YYYY-MM-DD"
+          },
+          "endDate": {
+            "type": "string",
+            "description": "YYYY, YYYY-MM, or YYYY-MM-DD; omitted means ongoing"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "highlights": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Education": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "institution": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "area": {
+            "type": "string"
+          },
+          "studyType": {
+            "type": "string"
+          },
+          "startDate": {
+            "type": "string"
+          },
+          "endDate": {
+            "type": "string"
+          },
+          "score": {
+            "type": "string"
+          },
+          "courses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Skill": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string"
+          },
+          "keywords": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Award": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          },
+          "awarder": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "Target": {
+        "type": "object",
+        "description": "A named, bespoke resume variant: a SELECTION over the master resume's own real Work/Education/Skill/Award entries (by id), plus two optional text overrides. Never a duplicate of the underlying data.\n",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "name": {
+            "type": "string"
+          },
+          "included_work_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "included_education_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "included_skill_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "included_award_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "summary_override": {
+            "type": "string",
+            "nullable": true,
+            "description": "Overrides basics.summary in the resolved view. null/absent means unchanged."
+          },
+          "label_override": {
+            "type": "string",
+            "nullable": true,
+            "description": "Overrides basics.label in the resolved view. null/absent means unchanged."
+          }
+        }
+      },
+      "VerifyResult": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            }
+          },
+          "passed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Check": {
+        "type": "object",
+        "properties": {
+          "rule": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -375,15 +375,48 @@ func main() {
 	// CommunityToolsTargetsHandler (already registered below via the trailing-slash prefix) --
 	// only the master resume's own export.pdf needs a new top-level route here.
 	communityToolsExportH := &handlers.CommunityToolsExportHandler{DB: db}
+	// CommunityToolsBasicsHandler + CommunityToolsEntryHandler[T] x4 (2026-09-09, same day) --
+	// founder real-time: "ensure that all of the features we have have good api because i am
+	// going to ask agents to work with those primitives to start intelligently managing the
+	// resume using agentic ai." Real, agent-ergonomic PATCH/POST/DELETE primitives alongside
+	// the existing whole-document GET/PUT -- an agent fixing one field (or adding/editing/
+	// removing one Work/Education/Skill/Award entry) no longer has to fetch, mutate, and resend
+	// the ENTIRE resume every time. See CommunityToolsBasicsHandler's own doc comment for why a
+	// hand-written per-field patch struct isn't needed here.
+	communityToolsBasicsH := &handlers.CommunityToolsBasicsHandler{DB: db}
+	communityToolsWorkH := handlers.NewCommunityToolsWorkHandler(db)
+	communityToolsEducationH := handlers.NewCommunityToolsEducationHandler(db)
+	communityToolsSkillsH := handlers.NewCommunityToolsSkillsHandler(db)
+	communityToolsAwardsH := handlers.NewCommunityToolsAwardsHandler(db)
 	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
 	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
 	communityToolsTargetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsTargetsH))
 	communityToolsExportProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsExportH))
+	communityToolsBasicsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsBasicsH))
+	communityToolsWorkProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsWorkH))
+	communityToolsEducationProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsEducationH))
+	communityToolsSkillsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsSkillsH))
+	communityToolsAwardsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsAwardsH))
 	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
 	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
 	mux.Handle("/api/v1/community-tools/resume/export.pdf", communityToolsExportProtected)
+	mux.Handle("/api/v1/community-tools/resume/basics", communityToolsBasicsProtected)
+	mux.Handle("/api/v1/community-tools/resume/work", communityToolsWorkProtected)
+	mux.Handle("/api/v1/community-tools/resume/work/", communityToolsWorkProtected)
+	mux.Handle("/api/v1/community-tools/resume/education", communityToolsEducationProtected)
+	mux.Handle("/api/v1/community-tools/resume/education/", communityToolsEducationProtected)
+	mux.Handle("/api/v1/community-tools/resume/skills", communityToolsSkillsProtected)
+	mux.Handle("/api/v1/community-tools/resume/skills/", communityToolsSkillsProtected)
+	mux.Handle("/api/v1/community-tools/resume/awards", communityToolsAwardsProtected)
+	mux.Handle("/api/v1/community-tools/resume/awards/", communityToolsAwardsProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets", communityToolsTargetsProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets/", communityToolsTargetsProtected)
+	// openapi.json -- a real, machine-readable schema for every route above, served over HTTP
+	// so an agent can bootstrap understanding of these primitives without needing filesystem/
+	// source access. Deliberately public (no auth) at this URL, matching JWKS's own precedent
+	// (a schema describes the shape of the API, not any caller's own data) -- every actual data
+	// route above still enforces community-tools.access same as before.
+	mux.Handle("/api/v1/community-tools/openapi.json", &handlers.CommunityToolsOpenAPIHandler{})
 
 	// CP-COMPLIANCE-REC-1: both routes are compliance.recording.manage-gated.
 	complianceRecH := &handlers.ComplianceRecordingHandler{DB: db}

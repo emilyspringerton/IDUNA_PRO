@@ -493,3 +493,370 @@ func TestCommunityToolsTargetsHandler_ExportUnknownIDReturns404(t *testing.T) {
 		t.Fatalf("expected 404 for an unknown target ID, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// ---- Agent-ergonomic primitives -- founder real-time, 2026-09-09: "ensure that all of the
+// features we have have good api because i am going to ask agents to work with those
+// primitives to start intelligently managing the resume using agentic ai." Real
+// PATCH/POST/DELETE endpoints alongside the existing whole-document GET/PUT. ----
+
+func newTestCommunityToolsBasicsHandler(t *testing.T, keys *jwt.Keys, db *sql.DB) http.Handler {
+	t.Helper()
+	h := &handlers.CommunityToolsBasicsHandler{DB: db}
+	return middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(h))
+}
+
+func newTestCommunityToolsWorkHandler(t *testing.T, keys *jwt.Keys, db *sql.DB) http.Handler {
+	t.Helper()
+	return middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsWorkHandler(db)))
+}
+
+func TestCommunityToolsBasicsHandler_PatchMergesWithoutTouchingWork(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	basics := newTestCommunityToolsBasicsHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	saveMasterResumeWithTwoJobs(t, crud, token)
+
+	body, _ := json.Marshal(map[string]string{"phone": "555-9999"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/basics", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	basics.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var res resume.Resume
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if res.Basics.Phone != "555-9999" {
+		t.Fatalf("expected the patched phone to take effect, got %q", res.Basics.Phone)
+	}
+	if res.Basics.Name != "Jordan Rivera" {
+		t.Fatalf("expected the OMITTED name field to stay untouched by the patch, got %q", res.Basics.Name)
+	}
+	if len(res.Work) != 2 {
+		t.Fatalf("expected a Basics-only patch to leave Work entirely untouched, got %d entries", len(res.Work))
+	}
+}
+
+func TestCommunityToolsBasicsHandler_ForbiddenWithoutFlag(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	basics := newTestCommunityToolsBasicsHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/basics", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	basics.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 without community-tools.access, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCommunityToolsEntryHandler_CreatePatchDeleteWorkEntry(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	work := newTestCommunityToolsWorkHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	saveMasterResumeWithTwoJobs(t, crud, token)
+
+	// Create -- a real, fresh entry, server-assigned id regardless of anything sent.
+	createBody, _ := json.Marshal(map[string]any{"id": "client-supplied-should-be-ignored", "name": "New Co", "position": "New Role"})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/resume/work", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createRR := httptest.NewRecorder()
+	work.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+	var created resume.Work
+	if err := json.Unmarshal(createRR.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.ID == "" || created.ID == "client-supplied-should-be-ignored" {
+		t.Fatalf("expected a real, server-assigned id ignoring the client-supplied one, got %q", created.ID)
+	}
+
+	// Confirm it actually persisted onto the master resume (now 3 work entries).
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getRR := httptest.NewRecorder()
+	crud.ServeHTTP(getRR, getReq)
+	var afterCreate resume.Resume
+	json.Unmarshal(getRR.Body.Bytes(), &afterCreate)
+	if len(afterCreate.Work) != 3 {
+		t.Fatalf("expected the new entry to persist onto the master resume (3 total), got %d", len(afterCreate.Work))
+	}
+
+	// Patch -- a real partial merge: only "position" is sent, "name" (New Co) must survive.
+	patchBody, _ := json.Marshal(map[string]any{"position": "Updated Role", "id": "attempt-to-hijack-id"})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/work/"+created.ID, bytes.NewReader(patchBody))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchRR := httptest.NewRecorder()
+	work.ServeHTTP(patchRR, patchReq)
+	if patchRR.Code != http.StatusOK {
+		t.Fatalf("PATCH: expected 200, got %d: %s", patchRR.Code, patchRR.Body.String())
+	}
+	var patched resume.Work
+	json.Unmarshal(patchRR.Body.Bytes(), &patched)
+	if patched.Position != "Updated Role" {
+		t.Fatalf("expected the patched field to take effect, got %q", patched.Position)
+	}
+	if patched.Name != "New Co" {
+		t.Fatalf("expected the OMITTED field to survive the partial merge, got %q", patched.Name)
+	}
+	if patched.ID != created.ID {
+		t.Fatalf("expected the id to be immune to being patched via the request body, got %q", patched.ID)
+	}
+
+	// Delete -- back down to 2 entries.
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/community-tools/resume/work/"+created.ID, nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delRR := httptest.NewRecorder()
+	work.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("DELETE: expected 200, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+	getRR2 := httptest.NewRecorder()
+	crud.ServeHTTP(getRR2, getReq)
+	var afterDelete resume.Resume
+	json.Unmarshal(getRR2.Body.Bytes(), &afterDelete)
+	if len(afterDelete.Work) != 2 {
+		t.Fatalf("expected the deleted entry to be gone (back to 2), got %d", len(afterDelete.Work))
+	}
+}
+
+func TestCommunityToolsEntryHandler_PatchUnknownIDReturns404(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	work := newTestCommunityToolsWorkHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	body, _ := json.Marshal(map[string]any{"position": "X"})
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/work/does-not-exist", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	work.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCommunityToolsEntryHandler_DeleteUnknownIDReturns404(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	work := newTestCommunityToolsWorkHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/community-tools/resume/work/does-not-exist", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	work.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCommunityToolsEntryHandler_ForbiddenWithoutFlag(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	work := newTestCommunityToolsWorkHandler(t, keys, db)
+	token := communityToolsToken(t, keys, 1)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/resume/work", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	work.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 without community-tools.access, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// One real, lighter smoke test per remaining entity type -- the actual CRUD logic is fully
+// shared/generic (CommunityToolsEntryHandler[T]), already proven thoroughly against Work above;
+// these just confirm each constructor is wired to the RIGHT resume field, not a copy-pasted
+// mistake (e.g. NewCommunityToolsSkillsHandler accidentally reading/writing r.Awards).
+func TestCommunityToolsEntryHandler_EducationSkillAwardCreateWiresToCorrectField(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	cases := []struct {
+		name    string
+		handler http.Handler
+		path    string
+		body    string
+	}{
+		{"education", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsEducationHandler(db))), "/api/v1/community-tools/resume/education", `{"institution":"Test U"}`},
+		{"skills", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsSkillsHandler(db))), "/api/v1/community-tools/resume/skills", `{"name":"Testing"}`},
+		{"awards", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsAwardsHandler(db))), "/api/v1/community-tools/resume/awards", `{"title":"Test Award"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, c.path, bytes.NewReader([]byte(c.body)))
+			req.Header.Set("Authorization", "Bearer "+token)
+			rr := httptest.NewRecorder()
+			c.handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("%s: expected 201, got %d: %s", c.name, rr.Code, rr.Body.String())
+			}
+		})
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	crud := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(&handlers.CommunityToolsHandler{DB: db}))
+	getRR := httptest.NewRecorder()
+	crud.ServeHTTP(getRR, getReq)
+	var res resume.Resume
+	if err := json.Unmarshal(getRR.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(res.Education) != 1 || res.Education[0].Institution != "Test U" {
+		t.Fatalf("expected the education entry to land in Education, got: %+v", res.Education)
+	}
+	if len(res.Skills) != 1 || res.Skills[0].Name != "Testing" {
+		t.Fatalf("expected the skill entry to land in Skills, got: %+v", res.Skills)
+	}
+	if len(res.Awards) != 1 || res.Awards[0].Title != "Test Award" {
+		t.Fatalf("expected the award entry to land in Awards, got: %+v", res.Awards)
+	}
+}
+
+func TestCommunityToolsTargetsHandler_CreatePatchDeleteOneTarget(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	master := saveMasterResumeWithTwoJobs(t, crud, token)
+
+	// Create -- POST one new target, server-assigned id regardless of anything sent.
+	createBody, _ := json.Marshal(map[string]any{"id": "hijack-attempt", "name": "My Target", "included_work_ids": []string{master.Work[0].ID}})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/resume/targets", bytes.NewReader(createBody))
+	createReq.Header.Set("Authorization", "Bearer "+token)
+	createRR := httptest.NewRecorder()
+	targets.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusCreated {
+		t.Fatalf("POST: expected 201, got %d: %s", createRR.Code, createRR.Body.String())
+	}
+	var created resume.Target
+	json.Unmarshal(createRR.Body.Bytes(), &created)
+	if created.ID == "" || created.ID == "hijack-attempt" {
+		t.Fatalf("expected a real, server-assigned id, got %q", created.ID)
+	}
+
+	// Patch -- a real partial merge, including the real three-way null-clears-the-override
+	// semantics: first set a summary override, then send an explicit null to clear it, then
+	// confirm a completely omitted field (name) survives untouched throughout.
+	setOverrideBody, _ := json.Marshal(map[string]any{"summary_override": "Tailored summary"})
+	setReq := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/targets/"+created.ID, bytes.NewReader(setOverrideBody))
+	setReq.Header.Set("Authorization", "Bearer "+token)
+	setRR := httptest.NewRecorder()
+	targets.ServeHTTP(setRR, setReq)
+	if setRR.Code != http.StatusOK {
+		t.Fatalf("PATCH (set override): expected 200, got %d: %s", setRR.Code, setRR.Body.String())
+	}
+	var withOverride resume.Target
+	json.Unmarshal(setRR.Body.Bytes(), &withOverride)
+	if withOverride.SummaryOverride == nil || *withOverride.SummaryOverride != "Tailored summary" {
+		t.Fatalf("expected the summary override to be set, got: %+v", withOverride.SummaryOverride)
+	}
+	if withOverride.Name != "My Target" {
+		t.Fatalf("expected the omitted name field to survive, got %q", withOverride.Name)
+	}
+
+	clearOverrideBody := []byte(`{"summary_override": null}`)
+	clearReq := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/targets/"+created.ID, bytes.NewReader(clearOverrideBody))
+	clearReq.Header.Set("Authorization", "Bearer "+token)
+	clearRR := httptest.NewRecorder()
+	targets.ServeHTTP(clearRR, clearReq)
+	if clearRR.Code != http.StatusOK {
+		t.Fatalf("PATCH (clear override): expected 200, got %d: %s", clearRR.Code, clearRR.Body.String())
+	}
+	var cleared resume.Target
+	json.Unmarshal(clearRR.Body.Bytes(), &cleared)
+	if cleared.SummaryOverride != nil {
+		t.Fatalf("expected an explicit null to clear the override, got: %+v", *cleared.SummaryOverride)
+	}
+	if cleared.Name != "My Target" {
+		t.Fatalf("expected the name to still survive untouched, got %q", cleared.Name)
+	}
+
+	// Delete.
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/community-tools/resume/targets/"+created.ID, nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delRR := httptest.NewRecorder()
+	targets.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("DELETE: expected 200, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listRR := httptest.NewRecorder()
+	targets.ServeHTTP(listRR, listReq)
+	var listed []resume.Target
+	json.Unmarshal(listRR.Body.Bytes(), &listed)
+	if len(listed) != 0 {
+		t.Fatalf("expected the deleted target to really be gone, got: %+v", listed)
+	}
+}
+
+func TestCommunityToolsTargetsHandler_PatchDeleteUnknownIDReturns404(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/targets/does-not-exist", bytes.NewReader([]byte(`{}`)))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchRR := httptest.NewRecorder()
+	targets.ServeHTTP(patchRR, patchReq)
+	if patchRR.Code != http.StatusNotFound {
+		t.Fatalf("PATCH: expected 404, got %d: %s", patchRR.Code, patchRR.Body.String())
+	}
+
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/community-tools/resume/targets/does-not-exist", nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delRR := httptest.NewRecorder()
+	targets.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusNotFound {
+		t.Fatalf("DELETE: expected 404, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+}
+
+func TestCommunityToolsOpenAPIHandler_ReturnsRealValidJSON(t *testing.T) {
+	h := &handlers.CommunityToolsOpenAPIHandler{}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/openapi.json", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("expected Content-Type application/json, got %q", ct)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("expected the served body to be real, valid JSON: %v", err)
+	}
+	if spec["openapi"] == nil {
+		t.Fatal("expected a real OpenAPI document (missing top-level \"openapi\" version field)")
+	}
+	paths, ok := spec["paths"].(map[string]any)
+	if !ok || len(paths) == 0 {
+		t.Fatal("expected a real, non-empty \"paths\" object describing the actual routes")
+	}
+	if _, ok := paths["/resume/work/{id}"]; !ok {
+		t.Error("expected the new per-entry PATCH/DELETE routes to actually be documented in the spec")
+	}
+}
+
+func TestCommunityToolsOpenAPIHandler_RejectsNonGET(t *testing.T) {
+	h := &handlers.CommunityToolsOpenAPIHandler{}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/openapi.json", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a non-GET method, got %d: %s", rr.Code, rr.Body.String())
+	}
+}

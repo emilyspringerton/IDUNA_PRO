@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -114,6 +115,249 @@ func assignResumeIDs(res *resume.Resume) {
 			res.Awards[i].ID = uuid.New().String()
 		}
 	}
+}
+
+// CommunityToolsBasicsHandler serves PATCH /api/v1/community-tools/resume/basics — founder
+// real-time, 2026-09-09: "ensure that all of the features we have have good api because i am
+// going to ask agents to work with those primitives to start intelligently managing the
+// resume using agentic ai." A real, agent-friendly PARTIAL update of just Basics
+// (name/label/email/phone/summary/etc.) without resending the entire resume document (every
+// Work/Education/Skill/Award entry untouched) — the real friction the whole-document PUT-only
+// design (CommunityToolsHandler.put) has for a caller that only wants to fix one field. Relies
+// on encoding/json's own real, native "unmarshal onto an already-populated value" semantics to
+// do the merge: a JSON key ABSENT from the request body leaves that field's existing value
+// untouched; a key PRESENT (including an explicit "" ) overwrites it. No hand-written
+// *string-pointer-per-field patch struct needed (the convention users.go's updateUserRequest
+// uses) — encoding/json already gives real, correct partial-merge semantics for free when the
+// destination is a real, already-populated Go value rather than a fresh zero one.
+type CommunityToolsBasicsHandler struct {
+	DB *sql.DB
+}
+
+func (h *CommunityToolsBasicsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.NotFound(w, r)
+		return
+	}
+	uidPtr := callerLocalUID(r)
+	if uidPtr == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	uid := *uidPtr
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	res, err := loadResume(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := json.Unmarshal(body, &res.Basics); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	if err := saveResume(r.Context(), h.DB, uid, res); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// entryOps describes how to address one ID'd list-of-entries field on a Resume (Work,
+// Education, Skill, or Award) generically enough that CommunityToolsEntryHandler[T] below can
+// serve all four with one real implementation instead of four hand-duplicated copies — the
+// same real generics-over-duplication judgment call target.go's own filterByID[T] already made.
+type entryOps[T any] struct {
+	get   func(*resume.Resume) []T
+	set   func(*resume.Resume, []T)
+	getID func(*T) string
+	setID func(*T, string)
+}
+
+// CommunityToolsEntryHandler serves the real per-entry primitives an agent (or any client) can
+// use instead of a whole-document PUT: POST {prefix} to create ONE new entry (server-assigns a
+// fresh ID regardless of anything the caller sent — the same real "never trust a client-supplied
+// ID on create" caution assignResumeIDs' own doc comment already establishes), PATCH
+// {prefix}/{id} to merge partial fields onto ONE existing entry (see CommunityToolsBasicsHandler's
+// own doc comment for the real encoding/json partial-merge reasoning, identical here), and
+// DELETE {prefix}/{id} to remove one entry. One real, shared implementation via Go generics,
+// registered four times in main.go (Work/Education/Skill/Award) with a different entryOps[T]
+// and Prefix each — see CommunityToolsTargetsHandler's own sibling single-target
+// create/patch/delete methods for the analogous primitives over Targets.
+type CommunityToolsEntryHandler[T any] struct {
+	DB     *sql.DB
+	Prefix string // this handler's own exact base path, e.g. "/api/v1/community-tools/resume/work"
+	Ops    entryOps[T]
+}
+
+// NewCommunityToolsWorkHandler/Education/Skills/Awards -- real, exported constructors, one per
+// entry type, so main.go (a different package) never needs direct access to the unexported
+// entryOps machinery above. Each fully wires DB/Prefix/Ops together — a caller that forgets to
+// set Ops (a real, live bug this fixes: main.go's own first draft built these structs with only
+// DB/Prefix set, leaving Ops a zero-value struct of nil funcs — compiles fine, panics the first
+// time any of get/set/getID/setID is actually called) simply can't happen anymore.
+func NewCommunityToolsWorkHandler(db *sql.DB) *CommunityToolsEntryHandler[resume.Work] {
+	return &CommunityToolsEntryHandler[resume.Work]{
+		DB:     db,
+		Prefix: "/api/v1/community-tools/resume/work",
+		Ops: entryOps[resume.Work]{
+			get:   func(r *resume.Resume) []resume.Work { return r.Work },
+			set:   func(r *resume.Resume, list []resume.Work) { r.Work = list },
+			getID: func(w *resume.Work) string { return w.ID },
+			setID: func(w *resume.Work, id string) { w.ID = id },
+		},
+	}
+}
+
+func NewCommunityToolsEducationHandler(db *sql.DB) *CommunityToolsEntryHandler[resume.Education] {
+	return &CommunityToolsEntryHandler[resume.Education]{
+		DB:     db,
+		Prefix: "/api/v1/community-tools/resume/education",
+		Ops: entryOps[resume.Education]{
+			get:   func(r *resume.Resume) []resume.Education { return r.Education },
+			set:   func(r *resume.Resume, list []resume.Education) { r.Education = list },
+			getID: func(e *resume.Education) string { return e.ID },
+			setID: func(e *resume.Education, id string) { e.ID = id },
+		},
+	}
+}
+
+func NewCommunityToolsSkillsHandler(db *sql.DB) *CommunityToolsEntryHandler[resume.Skill] {
+	return &CommunityToolsEntryHandler[resume.Skill]{
+		DB:     db,
+		Prefix: "/api/v1/community-tools/resume/skills",
+		Ops: entryOps[resume.Skill]{
+			get:   func(r *resume.Resume) []resume.Skill { return r.Skills },
+			set:   func(r *resume.Resume, list []resume.Skill) { r.Skills = list },
+			getID: func(s *resume.Skill) string { return s.ID },
+			setID: func(s *resume.Skill, id string) { s.ID = id },
+		},
+	}
+}
+
+func NewCommunityToolsAwardsHandler(db *sql.DB) *CommunityToolsEntryHandler[resume.Award] {
+	return &CommunityToolsEntryHandler[resume.Award]{
+		DB:     db,
+		Prefix: "/api/v1/community-tools/resume/awards",
+		Ops: entryOps[resume.Award]{
+			get:   func(r *resume.Resume) []resume.Award { return r.Awards },
+			set:   func(r *resume.Resume, list []resume.Award) { r.Awards = list },
+			getID: func(a *resume.Award) string { return a.ID },
+			setID: func(a *resume.Award, id string) { a.ID = id },
+		},
+	}
+}
+
+func (h *CommunityToolsEntryHandler[T]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	uidPtr := callerLocalUID(r)
+	if uidPtr == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	uid := *uidPtr
+
+	id := strings.TrimPrefix(r.URL.Path, h.Prefix)
+	id = strings.TrimPrefix(id, "/")
+
+	if id == "" {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		h.create(w, r, uid)
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		h.patch(w, r, uid, id)
+	case http.MethodDelete:
+		h.delete(w, r, uid, id)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (h *CommunityToolsEntryHandler[T]) create(w http.ResponseWriter, r *http.Request, uid int) {
+	var entry T
+	if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	res, err := loadResume(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	h.Ops.setID(&entry, uuid.New().String())
+	h.Ops.set(res, append(h.Ops.get(res), entry))
+	if err := saveResume(r.Context(), h.DB, uid, res); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+func (h *CommunityToolsEntryHandler[T]) patch(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	res, err := loadResume(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	list := h.Ops.get(res)
+	for i := range list {
+		if h.Ops.getID(&list[i]) != id {
+			continue
+		}
+		if err := json.Unmarshal(body, &list[i]); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		h.Ops.setID(&list[i], id) // guard: the id itself is never patchable via the request body
+		h.Ops.set(res, list)
+		if err := saveResume(r.Context(), h.DB, uid, res); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, list[i])
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+}
+
+func (h *CommunityToolsEntryHandler[T]) delete(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	res, err := loadResume(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	list := h.Ops.get(res)
+	out := list[:0:0] // a real, fresh backing array — never alias the original slice's storage
+	found := false
+	for _, item := range list {
+		if h.Ops.getID(&item) == id {
+			found = true
+			continue
+		}
+		out = append(out, item)
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	h.Ops.set(res, out)
+	if err := saveResume(r.Context(), h.DB, uid, res); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
 // CommunityToolsExportHandler serves /api/v1/community-tools/resume/export.pdf — the real
@@ -250,16 +494,23 @@ func (h *CommunityToolsTargetsHandler) ServeHTTP(w http.ResponseWriter, r *http.
 			h.list(w, r, uid)
 		case http.MethodPut:
 			h.replace(w, r, uid)
+		// POST -- founder real-time, 2026-09-09: "ensure that all of the features we have have
+		// good api because i am going to ask agents to work with those primitives." A real,
+		// agent-friendly "create ONE new target" primitive alongside the existing whole-list
+		// PUT — an agent adding a single bespoke resume no longer needs to fetch, mutate, and
+		// resend every OTHER target it isn't touching.
+		case http.MethodPost:
+			h.create(w, r, uid)
 		default:
 			http.NotFound(w, r)
 		}
 		return
 	}
 
-	// {id}/resolved, {id}/verify, or {id}/export.pdf -- the only three real sub-route shapes
-	// this handler supports, matching sip_accounts.go's own established "TrimPrefix, then
-	// compare the remaining segments" convention rather than a full path-templating router
-	// (this repo has none, and three fixed suffixes don't need one).
+	// {id}/resolved, {id}/verify, or {id}/export.pdf -- the three real sub-route shapes with a
+	// fixed suffix, matching sip_accounts.go's own established "TrimPrefix, then compare the
+	// remaining segments" convention rather than a full path-templating router (this repo has
+	// none). A bare {id} (no suffix) is the real single-target PATCH/DELETE primitives below.
 	if strings.HasSuffix(path, "/resolved") {
 		id := strings.TrimSuffix(path, "/resolved")
 		if r.Method != http.MethodGet {
@@ -287,7 +538,105 @@ func (h *CommunityToolsTargetsHandler) ServeHTTP(w http.ResponseWriter, r *http.
 		h.exportTarget(w, r, uid, id)
 		return
 	}
-	http.NotFound(w, r)
+	switch r.Method {
+	case http.MethodPatch:
+		h.patchOne(w, r, uid, path)
+	case http.MethodDelete:
+		h.deleteOne(w, r, uid, path)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// create -- POST .../resume/targets, the real single-target counterpart to replace's own
+// whole-list PUT. Server-assigns a fresh id regardless of anything in the request body — the
+// same never-trust-a-client-supplied-id-on-create caution CommunityToolsEntryHandler.create's
+// own doc comment already names.
+func (h *CommunityToolsTargetsHandler) create(w http.ResponseWriter, r *http.Request, uid int) {
+	var t resume.Target
+	if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	targets, err := loadTargets(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	t.ID = uuid.New().String()
+	targets = append(targets, t)
+	if err := saveTargets(r.Context(), h.DB, uid, targets); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusCreated, t)
+}
+
+// patchOne -- PATCH .../resume/targets/{id}, a real partial-merge update of one target (e.g. an
+// agent tweaking just SummaryOverride, or adding one more work id to IncludedWorkIDs) without
+// resending the whole target list. Relies on the same real encoding/json "unmarshal onto an
+// already-populated value" merge semantics CommunityToolsBasicsHandler's own doc comment
+// explains — including a real, useful three-way distinction for SummaryOverride/LabelOverride
+// specifically: the JSON key ABSENT leaves the existing override untouched, present as `null`
+// explicitly CLEARS it (a real, deliberate "remove this override" action), present as a string
+// sets it — exactly resume.Target's own *string-pointer contract, now reachable via a real
+// partial PATCH instead of only a full-document PUT.
+func (h *CommunityToolsTargetsHandler) patchOne(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid body"})
+		return
+	}
+	targets, err := loadTargets(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	for i := range targets {
+		if targets[i].ID != id {
+			continue
+		}
+		if err := json.Unmarshal(body, &targets[i]); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+			return
+		}
+		targets[i].ID = id // guard: the id itself is never patchable via the request body
+		if err := saveTargets(r.Context(), h.DB, uid, targets); err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, targets[i])
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "target not found"})
+}
+
+// deleteOne -- DELETE .../resume/targets/{id}, the real single-target counterpart to removing
+// an entry by simply omitting it from a whole-list PUT.
+func (h *CommunityToolsTargetsHandler) deleteOne(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	targets, err := loadTargets(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	out := targets[:0:0] // a real, fresh backing array -- never alias the original slice's storage
+	found := false
+	for _, t := range targets {
+		if t.ID == id {
+			found = true
+			continue
+		}
+		out = append(out, t)
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "target not found"})
+		return
+	}
+	if err := saveTargets(r.Context(), h.DB, uid, out); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
 func (h *CommunityToolsTargetsHandler) list(w http.ResponseWriter, r *http.Request, uid int) {
