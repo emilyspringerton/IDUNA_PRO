@@ -88,6 +88,17 @@ in the data model since day one but rendered nowhere (no UI, no PDF, no screen p
 no stable id to select into a Target — all three now fixed. See
 `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4e/§4f for the full writeup.
 
+**Real, shipped same day (Compact PDF template + candidate name/timestamp in exports)**:
+`resume.RenderPDF` now takes a `template` argument — "classic" (unchanged, ATS-safe) or the new
+"compact", a real, deliberately opt-in two-column layout (Experience/Education side by side via
+a manually-positioned `colState` helper) that frees vertical space for a fuller Skills section,
+at the honest, named cost of the same ATS multi-column parsing risk "classic" exists to avoid.
+Every generated PDF now carries a real footer (candidate name + export timestamp, via fpdf's own
+`SetFooterFunc`) and a filename that includes both, not just a generic name. Verified by
+decompressing the real PDF's own FlateDecode content stream and confirming "Experience"/
+"Education" render at genuinely distinct x-coordinates. See
+`CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4h for the full writeup.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),
