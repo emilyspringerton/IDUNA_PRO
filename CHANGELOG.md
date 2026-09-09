@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-09
+- Community Tools: fix userToJSON to actually return is_community_tools_enabled (real gap -- PATCH accepted it, list/get never surfaced it), 2 new tests. Deployed live. Apple #18742. (sess-20260905-0720-ec33e7c5)
 - Community Tools: real, downloadable ATS-safe PDF export (Layer 3) -- internal/resume/pdf.go (github.com/go-pdf/fpdf, no cgo), GET .../resume/export.pdf and .../targets/{id}/export.pdf, header-injection-safe pdfFilename sanitizer, 16 new tests, live-verified against a fresh-SQLite-booted binary. Apple #18738. (sess-20260905-0720-ec33e7c5)
 - feat(community-tools): real Target resumes -- bespoke, tailored variants per opportunity. Work/Education/Skill/Award get stable IDs; new Target{IncludedXIDs, SummaryOverride, LabelOverride} + Resolve(master, target). New /targets, /targets/{id}/resolved, /targets/{id}/verify endpoints -- verify runs against the resolved view, not the master. New migration (sibling targets JSON column). 17 new tests. Full suite green. Apple #18733. (sess-20260905-0720-ec33e7c5)
 
