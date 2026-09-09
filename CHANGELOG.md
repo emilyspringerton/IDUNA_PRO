@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-09
+- feat(community-tools): real Target resumes -- bespoke, tailored variants per opportunity. Work/Education/Skill/Award get stable IDs; new Target{IncludedXIDs, SummaryOverride, LabelOverride} + Resolve(master, target). New /targets, /targets/{id}/resolved, /targets/{id}/verify endpoints -- verify runs against the resolved view, not the master. New migration (sibling targets JSON column). 17 new tests. Full suite green. Apple #18733. (sess-20260905-0720-ec33e7c5)
 
 - feat(community-tools): resume/CV builder + verifier, gated by a real per-account feature flag (IsCommunityToolsEnabled -> community-tools.access permission). Real JSON Resume schema-mirrored data model + itemized 2-layer verify (schema conformance + ATS-readiness rules). GET/PUT resume + POST verify, scoped to caller's own local_uid. Live-verified fresh-SQLite boot + migration. 12 new tests, full suite green. Apple #18725. (sess-20260905-0720-ec33e7c5)
 
