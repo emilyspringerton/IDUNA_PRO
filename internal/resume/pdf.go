@@ -54,6 +54,10 @@ func RenderPDF(r *Resume) ([]byte, error) {
 		pdf.SetFont("Arial", "", 10)
 		pdf.CellFormat(0, 6, tr(contact), "", 1, "C", false, 0, "")
 	}
+	if links := profileLinks(b.Profiles); links != "" {
+		pdf.SetFont("Arial", "", 9)
+		pdf.CellFormat(0, 6, tr(links), "", 1, "C", false, 0, "")
+	}
 	pdf.Ln(3)
 
 	if b.Summary != "" {
@@ -146,4 +150,28 @@ func joinNonEmpty(sep string, parts ...string) string {
 		}
 	}
 	return strings.Join(out, sep)
+}
+
+// profileLinks -- founder real-time, 2026-09-09: "we need to be able to add and configure the
+// output of multiple github links." Renders every profile as one real "Network: address" pair
+// (the URL if set, else the username -- a real profile with neither is skipped entirely rather
+// than printing a bare, meaningless "GitHub:"), joined onto one line under the contact info.
+// Real, deliberate ordering choice: profiles render in the SAME order they appear in
+// b.Profiles, so a Target's own real, chosen selection order is respected, not resorted.
+func profileLinks(profiles []Profile) string {
+	parts := make([]string, 0, len(profiles))
+	for _, p := range profiles {
+		address := p.URL
+		if address == "" {
+			address = p.Username
+		}
+		if address == "" {
+			continue
+		}
+		label := joinNonEmpty(": ", p.Network, address)
+		if label != "" {
+			parts = append(parts, label)
+		}
+	}
+	return strings.Join(parts, "   |   ")
 }

@@ -87,7 +87,7 @@ func (h *CommunityToolsHandler) put(w http.ResponseWriter, r *http.Request, uid 
 	writeJSON(w, http.StatusOK, res)
 }
 
-// assignResumeIDs gives every Work/Education/Skill/Award entry missing an ID a real,
+// assignResumeIDs gives every Work/Education/Skill/Award/Profile entry missing an ID a real,
 // fresh one — server-side, so the client never needs a UUID library of its own (see
 // resume.Work.ID's own doc comment for why a stable ID matters: Target's own real
 // selection lists reference these). An entry that already has an ID (the caller sent
@@ -113,6 +113,11 @@ func assignResumeIDs(res *resume.Resume) {
 	for i := range res.Awards {
 		if res.Awards[i].ID == "" {
 			res.Awards[i].ID = uuid.New().String()
+		}
+	}
+	for i := range res.Basics.Profiles {
+		if res.Basics.Profiles[i].ID == "" {
+			res.Basics.Profiles[i].ID = uuid.New().String()
 		}
 	}
 }
@@ -247,6 +252,23 @@ func NewCommunityToolsAwardsHandler(db *sql.DB) *CommunityToolsEntryHandler[resu
 			set:   func(r *resume.Resume, list []resume.Award) { r.Awards = list },
 			getID: func(a *resume.Award) string { return a.ID },
 			setID: func(a *resume.Award, id string) { a.ID = id },
+		},
+	}
+}
+
+// NewCommunityToolsProfilesHandler -- founder real-time, 2026-09-09: "we need to be able to add
+// and configure the output of multiple github links." Profile lives on Basics (not directly on
+// Resume like the other four entry types), but entryOps[T]'s get/set closures reach it exactly
+// the same way — no special-casing needed in CommunityToolsEntryHandler itself.
+func NewCommunityToolsProfilesHandler(db *sql.DB) *CommunityToolsEntryHandler[resume.Profile] {
+	return &CommunityToolsEntryHandler[resume.Profile]{
+		DB:     db,
+		Prefix: "/api/v1/community-tools/resume/profiles",
+		Ops: entryOps[resume.Profile]{
+			get:   func(r *resume.Resume) []resume.Profile { return r.Basics.Profiles },
+			set:   func(r *resume.Resume, list []resume.Profile) { r.Basics.Profiles = list },
+			getID: func(p *resume.Profile) string { return p.ID },
+			setID: func(p *resume.Profile, id string) { p.ID = id },
 		},
 	}
 }

@@ -20,6 +20,10 @@ func TestResolve_FiltersToOnlyIncludedEntries(t *testing.T) {
 			{ID: "a1", Title: "Employee of the Month"},
 		},
 	}
+	master.Basics.Profiles = []Profile{
+		{ID: "p1", Network: "GitHub", URL: "github.com/jordan/parena"},
+		{ID: "p2", Network: "GitHub", URL: "github.com/jordan/burrow"},
+	}
 	target := &Target{
 		ID:                   "t1",
 		Name:                 "Kitchen jobs",
@@ -27,6 +31,7 @@ func TestResolve_FiltersToOnlyIncludedEntries(t *testing.T) {
 		IncludedEducationIDs: []string{"e1"},
 		IncludedSkillIDs:     []string{"s1"},
 		IncludedAwardIDs:     nil, // deliberately none
+		IncludedProfileIDs:   []string{"p2"},
 	}
 
 	got := Resolve(master, target)
@@ -43,8 +48,38 @@ func TestResolve_FiltersToOnlyIncludedEntries(t *testing.T) {
 	if len(got.Awards) != 0 {
 		t.Fatalf("expected zero Awards (none included), got: %+v", got.Awards)
 	}
+	if len(got.Basics.Profiles) != 1 || got.Basics.Profiles[0].ID != "p2" {
+		t.Fatalf("expected only p2 (the burrow link) in resolved Profiles, got: %+v", got.Basics.Profiles)
+	}
 	if got.Basics.Name != "Jordan Rivera" {
 		t.Errorf("Basics.Name should pass through unfiltered, got %q", got.Basics.Name)
+	}
+}
+
+// TestResolve_MultipleGitHubProfilesCanBeSelectedIndependently -- founder real-time,
+// 2026-09-09: "we need to be able to add and configure the output of multiple github links."
+// Two Profile entries with the IDENTICAL Network value ("GitHub") are real and distinguishable
+// purely by their own stable ID -- proves this works even when Network alone can't disambiguate.
+func TestResolve_MultipleGitHubProfilesCanBeSelectedIndependently(t *testing.T) {
+	master := &Resume{
+		Basics: Basics{
+			Profiles: []Profile{
+				{ID: "p1", Network: "GitHub", URL: "github.com/jordan/parena"},
+				{ID: "p2", Network: "GitHub", URL: "github.com/jordan/burrow"},
+				{ID: "p3", Network: "GitHub", URL: "github.com/jordan/carepyre"},
+			},
+		},
+	}
+	target := &Target{ID: "t1", IncludedProfileIDs: []string{"p1", "p3"}}
+
+	got := Resolve(master, target)
+
+	if len(got.Basics.Profiles) != 2 {
+		t.Fatalf("expected exactly 2 of the 3 GitHub links, got: %+v", got.Basics.Profiles)
+	}
+	gotIDs := map[string]bool{got.Basics.Profiles[0].ID: true, got.Basics.Profiles[1].ID: true}
+	if !gotIDs["p1"] || !gotIDs["p3"] {
+		t.Fatalf("expected p1 and p3 specifically, got: %+v", got.Basics.Profiles)
 	}
 }
 

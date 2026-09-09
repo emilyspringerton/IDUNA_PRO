@@ -24,6 +24,11 @@ type Target struct {
 	IncludedEducationIDs []string `json:"included_education_ids"`
 	IncludedSkillIDs     []string `json:"included_skill_ids"`
 	IncludedAwardIDs     []string `json:"included_award_ids"`
+	// IncludedProfileIDs -- founder real-time, 2026-09-09: "we need to be able to add and
+	// configure the output of multiple github links." Same real selection mechanism, applied to
+	// basics.profiles (see Profile.ID's own doc comment for why multiple entries sharing the
+	// same Network value, e.g. several distinct GitHub repo links, is real and expected).
+	IncludedProfileIDs []string `json:"included_profile_ids"`
 	// SummaryOverride/LabelOverride -- a real, per-target replacement for basics.summary /
 	// basics.label (the short professional-summary blurb and headline most real resume
 	// tailoring actually rewrites per opportunity — "even different little summary texts").
@@ -36,21 +41,23 @@ type Target struct {
 }
 
 // Resolve returns a real, independent, filtered COPY of master — only the Work/Education/
-// Skill/Award entries whose own ID is present in the target's own included-ID lists, with
-// SummaryOverride/LabelOverride applied to Basics if set. Every OTHER section (Certificates,
-// Publications, Languages, Interests, References, Projects, Volunteer, and every other Basics
-// field) passes through completely unfiltered — real, deliberate v0 scope: Work/Education/
-// Skills/Awards are the four sections this feature actually targets (the founder's own named
-// examples); the same real per-entry mechanism for the rest is real, separate, additive
-// follow-up, not attempted here. A nil target (or one selecting nothing at all in every list)
-// resolves to a resume with EMPTY Work/Education/Skills/Awards, not the full master — an
-// honest, literal "nothing selected means nothing shown," not a fallback to "show everything."
+// Skill/Award/Profile entries whose own ID is present in the target's own included-ID lists,
+// with SummaryOverride/LabelOverride applied to Basics if set. Every OTHER section
+// (Certificates, Publications, Languages, Interests, References, Projects, Volunteer, and every
+// other Basics field besides Profiles) passes through completely unfiltered — real, deliberate
+// v0 scope: Work/Education/Skills/Awards/Profiles are the sections this feature actually
+// targets (the founder's own named examples); the same real per-entry mechanism for the rest is
+// real, separate, additive follow-up, not attempted here. A nil target (or one selecting
+// nothing at all in every list) resolves to a resume with EMPTY Work/Education/Skills/Awards/
+// Profiles, not the full master — an honest, literal "nothing selected means nothing shown,"
+// not a fallback to "show everything."
 func Resolve(master *Resume, t *Target) *Resume {
 	out := *master // shallow copy: every OTHER field (Certificates, Projects, ...) is shared, not filtered
 	out.Work = filterByID(master.Work, t.IncludedWorkIDs, func(w Work) string { return w.ID })
 	out.Education = filterByID(master.Education, t.IncludedEducationIDs, func(e Education) string { return e.ID })
 	out.Skills = filterByID(master.Skills, t.IncludedSkillIDs, func(s Skill) string { return s.ID })
 	out.Awards = filterByID(master.Awards, t.IncludedAwardIDs, func(a Award) string { return a.ID })
+	out.Basics.Profiles = filterByID(master.Basics.Profiles, t.IncludedProfileIDs, func(p Profile) string { return p.ID })
 	if t.SummaryOverride != nil {
 		out.Basics.Summary = *t.SummaryOverride
 	}

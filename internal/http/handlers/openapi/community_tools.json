@@ -858,6 +858,111 @@
           }
         }
       }
+    },
+    "/resume/profiles": {
+      "post": {
+        "operationId": "createProfileEntry",
+        "summary": "Add one new Profile entry (e.g. a GitHub link)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Profile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The created entry, with its real, server-assigned id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/resume/profiles/{id}": {
+      "patch": {
+        "operationId": "patchProfileEntry",
+        "summary": "Partially update one Profile entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Profile"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Profile"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteProfileEntry",
+        "summary": "Remove one Profile entry by id",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EntryId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Deleted"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1034,18 +1139,7 @@
           "profiles": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "network": {
-                  "type": "string"
-                },
-                "username": {
-                  "type": "string"
-                },
-                "url": {
-                  "type": "string"
-                }
-              }
+              "$ref": "#/components/schemas/Profile"
             }
           }
         }
@@ -1215,6 +1309,12 @@
             "type": "string",
             "nullable": true,
             "description": "Overrides basics.label in the resolved view. null/absent means unchanged."
+          },
+          "included_profile_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
@@ -1242,6 +1342,26 @@
             "type": "boolean"
           },
           "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Profile": {
+        "type": "object",
+        "description": "A CarePyre extension beyond strict JSON Resume: id is a stable, server-assigned identifier a Target can reference. Multiple entries sharing the same network value (e.g. several distinct GitHub repo links) is real and expected.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "readOnly": true
+          },
+          "network": {
+            "type": "string",
+            "description": "A free-text label, e.g. \"GitHub\" or \"LinkedIn\"."
+          },
+          "username": {
+            "type": "string"
+          },
+          "url": {
             "type": "string"
           }
         }

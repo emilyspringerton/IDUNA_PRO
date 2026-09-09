@@ -388,6 +388,12 @@ func main() {
 	communityToolsEducationH := handlers.NewCommunityToolsEducationHandler(db)
 	communityToolsSkillsH := handlers.NewCommunityToolsSkillsHandler(db)
 	communityToolsAwardsH := handlers.NewCommunityToolsAwardsHandler(db)
+	// CommunityToolsProfilesHandler (2026-09-09, same day) -- founder real-time: "we need to be
+	// able to add and configure the output of multiple github links." basics.profiles existed
+	// in the data model since this feature's own JSON Resume mirror was first built, but had no
+	// UI, no PDF/preview rendering, and (until now) no stable per-entry id -- a real, silent gap
+	// closed here the same way Skills' own gap was closed earlier the same day.
+	communityToolsProfilesH := handlers.NewCommunityToolsProfilesHandler(db)
 	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
 	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
 	communityToolsTargetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsTargetsH))
@@ -397,6 +403,7 @@ func main() {
 	communityToolsEducationProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsEducationH))
 	communityToolsSkillsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsSkillsH))
 	communityToolsAwardsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsAwardsH))
+	communityToolsProfilesProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsProfilesH))
 	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
 	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
 	mux.Handle("/api/v1/community-tools/resume/export.pdf", communityToolsExportProtected)
@@ -409,6 +416,8 @@ func main() {
 	mux.Handle("/api/v1/community-tools/resume/skills/", communityToolsSkillsProtected)
 	mux.Handle("/api/v1/community-tools/resume/awards", communityToolsAwardsProtected)
 	mux.Handle("/api/v1/community-tools/resume/awards/", communityToolsAwardsProtected)
+	mux.Handle("/api/v1/community-tools/resume/profiles", communityToolsProfilesProtected)
+	mux.Handle("/api/v1/community-tools/resume/profiles/", communityToolsProfilesProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets", communityToolsTargetsProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets/", communityToolsTargetsProtected)
 	// openapi.json -- a real, machine-readable schema for every route above, served over HTTP

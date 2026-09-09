@@ -48,6 +48,16 @@ type Location struct {
 }
 
 type Profile struct {
+	// ID -- see Work.ID's own doc comment for the full real reasoning. Founder real-time,
+	// 2026-09-09: "we need to be able to add and configure the output of multiple github
+	// links" -- the same stable-per-entry-ID mechanism Work/Education/Skill/Award already have,
+	// extended to Profile so a Target can select which links show for a given opportunity
+	// (someone with several relevant repos, e.g. one per project, may want different subsets
+	// shown depending on the role). Note that JSON Resume's own schema places no meaning on
+	// `Network` beyond a free-text label ("GitHub", "LinkedIn") -- multiple Profile entries
+	// sharing the same Network value (several distinct GitHub repo links) is real, valid, and
+	// exactly the "multiple github links" case this field exists for.
+	ID       string `json:"id,omitempty"`
 	Network  string `json:"network,omitempty"`
 	Username string `json:"username,omitempty"`
 	URL      string `json:"url,omitempty"`

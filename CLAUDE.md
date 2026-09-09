@@ -75,6 +75,19 @@ filename sanitizer (`pdfFilename`) — live-verified against a real fresh-SQLite
 including a target literally named `Kitchen Jobs "Special"` to confirm the header stays
 well-formed. See `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4d for the full writeup.
 
+**Real, shipped same day (agent-ergonomic API primitives + OpenAPI spec, + multi-GitHub-links
+support)**: `PATCH /resume/basics`, `POST`/`PATCH`/`DELETE /resume/{work,education,skills,
+awards,profiles}[/{id}]`, and the analogous single-target primitives on `.../targets` — real
+partial-update primitives alongside the existing whole-document PUT, built specifically so an
+autonomous agent can make one small edit without resending everything (`encoding/json`'s own
+"merge onto an already-populated value" semantics do the work — no hand-written per-field patch
+struct needed). New `GET /api/v1/community-tools/openapi.json`, a real, complete, `go:embed`-ded
+OpenAPI 3.0 document covering every route. New `resume.Profile.ID` + `Target.IncludedProfileIDs`
+close a real, previously-silent gap: `basics.profiles` (GitHub/LinkedIn/portfolio links) existed
+in the data model since day one but rendered nowhere (no UI, no PDF, no screen preview) and had
+no stable id to select into a Target — all three now fixed. See
+`CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4e/§4f for the full writeup.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),

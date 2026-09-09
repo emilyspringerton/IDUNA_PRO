@@ -692,6 +692,7 @@ func TestCommunityToolsEntryHandler_EducationSkillAwardCreateWiresToCorrectField
 		{"education", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsEducationHandler(db))), "/api/v1/community-tools/resume/education", `{"institution":"Test U"}`},
 		{"skills", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsSkillsHandler(db))), "/api/v1/community-tools/resume/skills", `{"name":"Testing"}`},
 		{"awards", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsAwardsHandler(db))), "/api/v1/community-tools/resume/awards", `{"title":"Test Award"}`},
+		{"profiles", middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsProfilesHandler(db))), "/api/v1/community-tools/resume/profiles", `{"network":"GitHub","url":"github.com/test/repo"}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -722,6 +723,72 @@ func TestCommunityToolsEntryHandler_EducationSkillAwardCreateWiresToCorrectField
 	}
 	if len(res.Awards) != 1 || res.Awards[0].Title != "Test Award" {
 		t.Fatalf("expected the award entry to land in Awards, got: %+v", res.Awards)
+	}
+	if len(res.Basics.Profiles) != 1 || res.Basics.Profiles[0].URL != "github.com/test/repo" {
+		t.Fatalf("expected the profile entry to land in Basics.Profiles, got: %+v", res.Basics.Profiles)
+	}
+}
+
+// TestCommunityToolsProfilesHandler_MultipleGitHubLinksManagedIndependently -- the real,
+// end-to-end version of the founder's own literal ask: "we need to be able to add and configure
+// the output of multiple github links." Two profiles sharing the identical "GitHub" network
+// value must be independently addressable, patchable, and deletable by their own real id.
+func TestCommunityToolsProfilesHandler_MultipleGitHubLinksManagedIndependently(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, _, db := newTestCommunityToolsHandlers(t, keys)
+	profiles := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(handlers.NewCommunityToolsProfilesHandler(db)))
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	create := func(url string) resume.Profile {
+		body, _ := json.Marshal(map[string]string{"network": "GitHub", "url": url})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/community-tools/resume/profiles", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		profiles.ServeHTTP(rr, req)
+		if rr.Code != http.StatusCreated {
+			t.Fatalf("POST: expected 201, got %d: %s", rr.Code, rr.Body.String())
+		}
+		var p resume.Profile
+		json.Unmarshal(rr.Body.Bytes(), &p)
+		return p
+	}
+	parena := create("github.com/x/parena")
+	burrow := create("github.com/x/burrow")
+	if parena.ID == "" || burrow.ID == "" || parena.ID == burrow.ID {
+		t.Fatalf("expected two distinct, real, non-empty ids for two same-network links, got %q and %q", parena.ID, burrow.ID)
+	}
+
+	// Patch only the parena link's URL -- burrow must be untouched.
+	patchBody, _ := json.Marshal(map[string]string{"url": "github.com/x/parena-renamed"})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/v1/community-tools/resume/profiles/"+parena.ID, bytes.NewReader(patchBody))
+	patchReq.Header.Set("Authorization", "Bearer "+token)
+	patchRR := httptest.NewRecorder()
+	profiles.ServeHTTP(patchRR, patchReq)
+	if patchRR.Code != http.StatusOK {
+		t.Fatalf("PATCH: expected 200, got %d: %s", patchRR.Code, patchRR.Body.String())
+	}
+
+	// Delete only burrow.
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/community-tools/resume/profiles/"+burrow.ID, nil)
+	delReq.Header.Set("Authorization", "Bearer "+token)
+	delRR := httptest.NewRecorder()
+	profiles.ServeHTTP(delRR, delReq)
+	if delRR.Code != http.StatusOK {
+		t.Fatalf("DELETE: expected 200, got %d: %s", delRR.Code, delRR.Body.String())
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume", nil)
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	crud := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(&handlers.CommunityToolsHandler{DB: db}))
+	getRR := httptest.NewRecorder()
+	crud.ServeHTTP(getRR, getReq)
+	var res resume.Resume
+	json.Unmarshal(getRR.Body.Bytes(), &res)
+	if len(res.Basics.Profiles) != 1 {
+		t.Fatalf("expected exactly 1 remaining profile (parena, renamed; burrow deleted), got: %+v", res.Basics.Profiles)
+	}
+	if res.Basics.Profiles[0].ID != parena.ID || res.Basics.Profiles[0].URL != "github.com/x/parena-renamed" {
+		t.Fatalf("expected the surviving profile to be the renamed parena link, got: %+v", res.Basics.Profiles[0])
 	}
 }
 
@@ -848,6 +915,9 @@ func TestCommunityToolsOpenAPIHandler_ReturnsRealValidJSON(t *testing.T) {
 	}
 	if _, ok := paths["/resume/work/{id}"]; !ok {
 		t.Error("expected the new per-entry PATCH/DELETE routes to actually be documented in the spec")
+	}
+	if _, ok := paths["/resume/profiles/{id}"]; !ok {
+		t.Error("expected the new Profile (multiple GitHub links) routes to actually be documented in the spec")
 	}
 }
 
