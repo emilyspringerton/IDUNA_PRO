@@ -79,6 +79,14 @@ func (p *fakeUserProjector) Apply(_ context.Context, rec userlog.Record) error {
 		if u := p.byUID[d.LocalUID]; u != nil {
 			u.IsProviderAdmin = d.IsProviderAdmin
 		}
+	case userlog.EventUserCommunityToolsChanged:
+		var d userlog.UserCommunityToolsChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return err
+		}
+		if u := p.byUID[d.LocalUID]; u != nil {
+			u.IsCommunityToolsEnabled = d.IsCommunityToolsEnabled
+		}
 	}
 	return nil
 }
@@ -230,6 +238,65 @@ func TestUsersHandler_TopAdminCanSuspendAnOperatorAdmin(t *testing.T) {
 	rr := patchUser(t, h, token, 3, map[string]any{"status": "suspended"})
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 -- a Top Admin must be able to suspend an Operator Admin, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestUsersHandler_CommunityToolsFlagRoundTripsThroughListUsers -- real, live-found gap fixed
+// 2026-09-09: userToJSON never actually returned is_community_tools_enabled, so an admin console
+// checkbox built against GET /api/v1/users would always render unchecked regardless of the real,
+// underlying flag. This proves the PATCH actually reaches the field AND that the list endpoint
+// (not just GetByUID) reflects it back.
+func TestUsersHandler_CommunityToolsFlagRoundTripsThroughListUsers(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	token := mailAccountsToken(t, keys, 1, "users.admin")
+
+	rr := patchUser(t, h, token, 5, map[string]any{"is_community_tools_enabled": true})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 enabling community-tools access as a users.admin caller, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listRR := httptest.NewRecorder()
+	h.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 listing users, got %d: %s", listRR.Code, listRR.Body.String())
+	}
+	var users []map[string]any
+	if err := json.Unmarshal(listRR.Body.Bytes(), &users); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var found bool
+	for _, u := range users {
+		if int(u["local_uid"].(float64)) != 5 {
+			continue
+		}
+		found = true
+		if enabled, _ := u["is_community_tools_enabled"].(bool); !enabled {
+			t.Fatalf("expected is_community_tools_enabled=true to round-trip through the list endpoint, got: %+v", u)
+		}
+	}
+	if !found {
+		t.Fatal("expected to find uid 5 in the listed users")
+	}
+}
+
+func TestUsersHandler_NonAdminCannotSetCommunityToolsFlag(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+	}
+	h := newTierTestHandler(t, keys, seed)
+	// mail-accounts.provision only -- a Provider Operator, real but insufficient tier.
+	token := mailAccountsToken(t, keys, 6, "mail-accounts.provision")
+
+	rr := patchUser(t, h, token, 5, map[string]any{"is_community_tools_enabled": true})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 -- only an admin can grant community-tools access, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
 

@@ -656,6 +656,10 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		"is_provider":       u.IsProvider,
 		"is_provider_admin": u.IsProviderAdmin,
 		"org_id":            u.OrgID,
+		// is_community_tools_enabled -- real, live-found gap fixed 2026-09-09: this was settable
+		// via PATCH but never actually returned here, so the admin console had no way to show
+		// current state (a checkbox built against this would always render unchecked).
+		"is_community_tools_enabled": u.IsCommunityToolsEnabled,
 		"created_at":        u.CreatedAt.Format(time.RFC3339),
 		"updated_at":        u.UpdatedAt.Format(time.RFC3339),
 	}
