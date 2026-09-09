@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-09
+- Community Tools: multiple GitHub/LinkedIn links -- new Profile.ID, Target.IncludedProfileIDs, PDF/screen-preview rendering, and CRUD primitives via the same generic entry-handler machinery. Apple #18753. (sess-20260905-0720-ec33e7c5)
 - Community Tools: agent-ergonomic PATCH/POST/DELETE primitives (Work/Education/Skill/Award/Target) + a published OpenAPI 3.0 spec at /api/v1/community-tools/openapi.json. Apple #18752. (sess-20260905-0720-ec33e7c5)
 - Community Tools: fix userToJSON to actually return is_community_tools_enabled (real gap -- PATCH accepted it, list/get never surfaced it), 2 new tests. Deployed live. Apple #18742. (sess-20260905-0720-ec33e7c5)
 - Community Tools: real, downloadable ATS-safe PDF export (Layer 3) -- internal/resume/pdf.go (github.com/go-pdf/fpdf, no cgo), GET .../resume/export.pdf and .../targets/{id}/export.pdf, header-injection-safe pdfFilename sanitizer, 16 new tests, live-verified against a fresh-SQLite-booted binary. Apple #18738. (sess-20260905-0720-ec33e7c5)
