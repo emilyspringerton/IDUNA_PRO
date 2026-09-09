@@ -2,8 +2,10 @@
 // area (founder real-time, 2026-09-09: "build it into carepyre... as part of the
 // community tools but we want it to be gated so that accounts need a feature flag
 // set"), v0's own real first tool: a resume/CV builder + verifier against the real
-// JSON Resume standard. See CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md for the
-// full design.
+// JSON Resume standard, plus real, named Target resume variants (bespoke, tailored
+// subsets of the master resume for a specific opportunity — see
+// internal/resume/target.go's own doc comment for the full design). See
+// CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md for the full feature design.
 //
 // Every route here is gated by RequirePermission("community-tools.access") at
 // registration (main.go), which is itself driven by LocalUser.IsCommunityToolsEnabled
@@ -17,7 +19,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"idunapro/internal/resume"
 )
@@ -73,11 +78,42 @@ func (h *CommunityToolsHandler) put(w http.ResponseWriter, r *http.Request, uid 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return
 	}
+	assignResumeIDs(&res)
 	if err := saveResume(r.Context(), h.DB, uid, &res); err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// assignResumeIDs gives every Work/Education/Skill/Award entry missing an ID a real,
+// fresh one — server-side, so the client never needs a UUID library of its own (see
+// resume.Work.ID's own doc comment for why a stable ID matters: Target's own real
+// selection lists reference these). An entry that already has an ID (the caller sent
+// back an existing entry unchanged, or with edited field values but the same real
+// identity) keeps it — reassigning it on every save would silently break every real
+// Target that already references it.
+func assignResumeIDs(res *resume.Resume) {
+	for i := range res.Work {
+		if res.Work[i].ID == "" {
+			res.Work[i].ID = uuid.New().String()
+		}
+	}
+	for i := range res.Education {
+		if res.Education[i].ID == "" {
+			res.Education[i].ID = uuid.New().String()
+		}
+	}
+	for i := range res.Skills {
+		if res.Skills[i].ID == "" {
+			res.Skills[i].ID = uuid.New().String()
+		}
+	}
+	for i := range res.Awards {
+		if res.Awards[i].ID == "" {
+			res.Awards[i].ID = uuid.New().String()
+		}
+	}
 }
 
 // CommunityToolsVerifyHandler serves /api/v1/community-tools/resume/verify — a real,
@@ -104,6 +140,143 @@ func (h *CommunityToolsVerifyHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		return
 	}
 	writeJSON(w, http.StatusOK, resume.Verify(res))
+}
+
+// CommunityToolsTargetsHandler serves the real Target (bespoke resume variant) family of
+// routes — /api/v1/community-tools/resume/targets (GET list / PUT replace-whole-list, the
+// same real "one document, whole-replace" convention CommunityToolsHandler's own PUT already
+// establishes for the master resume — a Target list is small and edited as a set, not
+// field-by-field), plus two real per-target sub-routes: GET .../targets/{id}/resolved (the
+// real, filtered resume view resume.Resolve produces) and POST .../targets/{id}/verify
+// (real verification run against that RESOLVED view, not the master — catching e.g. "this
+// target hides every real work entry, it now fails has-work-or-education," a real, honest
+// signal the master's own verify can't give).
+type CommunityToolsTargetsHandler struct {
+	DB *sql.DB
+}
+
+func (h *CommunityToolsTargetsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	uidPtr := callerLocalUID(r)
+	if uidPtr == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	uid := *uidPtr
+
+	path := strings.TrimPrefix(r.URL.Path, "/api/v1/community-tools/resume/targets")
+	path = strings.TrimPrefix(path, "/")
+
+	if path == "" {
+		switch r.Method {
+		case http.MethodGet:
+			h.list(w, r, uid)
+		case http.MethodPut:
+			h.replace(w, r, uid)
+		default:
+			http.NotFound(w, r)
+		}
+		return
+	}
+
+	// {id}/resolved or {id}/verify -- the only two real real sub-route shapes this handler
+	// supports, matching sip_accounts.go's own established "TrimPrefix, then compare the
+	// remaining segments" convention rather than a full path-templating router (this repo
+	// has none, and two fixed suffixes don't need one).
+	if strings.HasSuffix(path, "/resolved") {
+		id := strings.TrimSuffix(path, "/resolved")
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		h.resolved(w, r, uid, id)
+		return
+	}
+	if strings.HasSuffix(path, "/verify") {
+		id := strings.TrimSuffix(path, "/verify")
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		h.verifyTarget(w, r, uid, id)
+		return
+	}
+	http.NotFound(w, r)
+}
+
+func (h *CommunityToolsTargetsHandler) list(w http.ResponseWriter, r *http.Request, uid int) {
+	targets, err := loadTargets(r.Context(), h.DB, uid)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, targets)
+}
+
+// replace -- real, deliberate whole-list PUT: the client sends back the complete desired set
+// of targets (an entry with no `id` is a real, new target — server-assigns one, the same real
+// convention assignResumeIDs above already establishes for master-resume entries; an entry
+// with an existing `id` is an edit; an id from the OLD list simply absent from the new one is
+// a real delete — no separate DELETE route needed for a list this small, matching this
+// handler's own header comment).
+func (h *CommunityToolsTargetsHandler) replace(w http.ResponseWriter, r *http.Request, uid int) {
+	var targets []resume.Target
+	if err := json.NewDecoder(r.Body).Decode(&targets); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+		return
+	}
+	for i := range targets {
+		if targets[i].ID == "" {
+			targets[i].ID = uuid.New().String()
+		}
+	}
+	if err := saveTargets(r.Context(), h.DB, uid, targets); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, targets)
+}
+
+func (h *CommunityToolsTargetsHandler) resolved(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	master, target, err := loadMasterAndTarget(r.Context(), h.DB, uid, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if target == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "target not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resume.Resolve(master, target))
+}
+
+func (h *CommunityToolsTargetsHandler) verifyTarget(w http.ResponseWriter, r *http.Request, uid int, id string) {
+	master, target, err := loadMasterAndTarget(r.Context(), h.DB, uid, id)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if target == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "target not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, resume.Verify(resume.Resolve(master, target)))
+}
+
+func loadMasterAndTarget(ctx context.Context, db *sql.DB, uid int, targetID string) (*resume.Resume, *resume.Target, error) {
+	master, err := loadResume(ctx, db, uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets, err := loadTargets(ctx, db, uid)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range targets {
+		if targets[i].ID == targetID {
+			return master, &targets[i], nil
+		}
+	}
+	return master, nil, nil
 }
 
 func loadResume(ctx context.Context, db *sql.DB, uid int) (*resume.Resume, error) {
@@ -133,6 +306,49 @@ func saveResume(ctx context.Context, db *sql.DB, uid int, res *resume.Resume) er
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO resumes (local_uid, data, created_at, updated_at) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(local_uid) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at`,
+		uid, string(raw), now, now,
+	)
+	return err
+}
+
+// loadTargets/saveTargets -- real, direct siblings of loadResume/saveResume above, over the
+// SAME `resumes` row's own separate `targets` column (see migration
+// 202609090002_resume_targets.sql's own doc comment for why this is a sibling column, not a
+// separate table). A row that doesn't exist yet (the caller never saved a master resume, or
+// even a resume, before managing targets) real-honestly returns an empty target list, not an
+// error -- the same "no data yet is a valid starting state" convention loadResume's own
+// zero-value fallback already establishes.
+func loadTargets(ctx context.Context, db *sql.DB, uid int) ([]resume.Target, error) {
+	var data string
+	row := db.QueryRowContext(ctx, `SELECT targets FROM resumes WHERE local_uid=?`, uid)
+	err := row.Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return []resume.Target{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var targets []resume.Target
+	if err := json.Unmarshal([]byte(data), &targets); err != nil {
+		return nil, err
+	}
+	return targets, nil
+}
+
+// saveTargets -- real, honest UPSERT: if the caller has never saved a master resume at all
+// yet, this still needs to create the real `resumes` row (with a real, valid, empty '{}'
+// master document) so the `targets` column has somewhere to live — real, deliberate
+// dependency-order choice (targets are a real VIEW over a master resume, so a row must exist),
+// not an oversight.
+func saveTargets(ctx context.Context, db *sql.DB, uid int, targets []resume.Target) error {
+	raw, err := json.Marshal(targets)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = db.ExecContext(ctx,
+		`INSERT INTO resumes (local_uid, data, targets, created_at, updated_at) VALUES (?, '{}', ?, ?, ?)
+		 ON CONFLICT(local_uid) DO UPDATE SET targets=excluded.targets, updated_at=excluded.updated_at`,
 		uid, string(raw), now, now,
 	)
 	return err

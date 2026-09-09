@@ -1,0 +1,12 @@
+-- Founder real-time, 2026-09-09 (same day as the resume/CV builder itself): "like we have a
+-- base set of things that we tell the system in terms of history and skills etc we need some
+-- way to start building more bespoke resumes for specific opportunities." Real, named Target
+-- resume variants -- each one a subset SELECTION over the master resume's own real
+-- Work/Education/Skill/Award entries (by stable ID) plus a small, named set of text overrides
+-- (summary/label), never a duplicate copy of the master data itself. See
+-- internal/resume/target.go's own real Target/Resolve doc comments for the full design.
+--
+-- Stored as a sibling JSON column on the SAME `resumes` row, not a separate table: a real,
+-- deliberate choice matching this feature's own real shape -- targets are VIEWS over one
+-- user's one master resume, not independent documents needing their own foreign-keyed rows.
+ALTER TABLE resumes ADD COLUMN targets TEXT NOT NULL DEFAULT '[]';

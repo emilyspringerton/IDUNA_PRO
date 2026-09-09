@@ -66,6 +66,17 @@ type Basics struct {
 }
 
 type Work struct {
+	// ID -- founder real-time, 2026-09-09: "we need to be able to build the resume as data
+	// like certain jobs we can show and hide from a specific target resume." A real,
+	// deliberate CarePyre extension beyond strict JSON Resume (jsonresume.org's own schema has
+	// no id field on a work entry) -- needed so a real, named Target (target.go) can reference
+	// a specific entry stably, surviving reordering/edits to OTHER entries, the same real
+	// reason any list-of-records needs a stable key rather than array position. Auto-assigned
+	// server-side (SaveMasterResume, community_tools.go) whenever a saved entry arrives with
+	// no ID (a genuinely new entry) -- the client never needs a UUID library. Exported (not
+	// internal-only) so a real client fetching the master resume can see and reference these
+	// same IDs when building/editing a Target's own selection.
+	ID          string   `json:"id,omitempty"`
 	Name        string   `json:"name,omitempty"`
 	Location    string   `json:"location,omitempty"`
 	Description string   `json:"description,omitempty"`
@@ -88,6 +99,8 @@ type Volunteer struct {
 }
 
 type Education struct {
+	// ID -- see Work.ID's own doc comment; identical real reasoning, applied here too.
+	ID          string   `json:"id,omitempty"`
 	Institution string   `json:"institution,omitempty"`
 	URL         string   `json:"url,omitempty"`
 	Area        string   `json:"area,omitempty"`
@@ -99,6 +112,10 @@ type Education struct {
 }
 
 type Award struct {
+	// ID -- see Work.ID's own doc comment for the full real reasoning. Founder real-time, same
+	// day: "the pattern probably applies to education awards experience skills" -- Award gets
+	// the identical real targeting mechanism.
+	ID      string `json:"id,omitempty"`
 	Title   string `json:"title,omitempty"`
 	Date    string `json:"date,omitempty"`
 	Awarder string `json:"awarder,omitempty"`
@@ -121,6 +138,13 @@ type Publication struct {
 }
 
 type Skill struct {
+	// ID -- see Work.ID's own doc comment for the full real reasoning. Founder real-time,
+	// same day: "this is probably most useful in the skills section" -- real-world resume
+	// tailoring commonly means emphasizing a different SKILL SUBSET per opportunity (e.g.
+	// "Python, Data Analysis" for one role vs. "Customer Service, POS Systems" for another)
+	// at least as often as hiding a whole job, so Skill gets the identical real targeting
+	// mechanism Work/Education already have.
+	ID       string   `json:"id,omitempty"`
 	Name     string   `json:"name,omitempty"`
 	Level    string   `json:"level,omitempty"`
 	Keywords []string `json:"keywords,omitempty"`

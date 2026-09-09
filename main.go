@@ -362,10 +362,20 @@ func main() {
 	// localUserPermissions), deliberately separate from the 4-tier admin/provider RBAC above.
 	communityToolsH := &handlers.CommunityToolsHandler{DB: db}
 	communityToolsVerifyH := &handlers.CommunityToolsVerifyHandler{DB: db}
+	// CommunityToolsTargetsHandler (2026-09-09, same day) -- real, named, bespoke resume
+	// variants ("like we have a base set of things... history and skills etc we need some way
+	// to start building more bespoke resumes for specific opportunities"). Registered with the
+	// trailing slash so Go's own ServeMux prefix-matches every real sub-route
+	// (.../targets/{id}/resolved, .../targets/{id}/verify) into this one handler's own internal
+	// path parsing -- see its own ServeHTTP doc comment.
+	communityToolsTargetsH := &handlers.CommunityToolsTargetsHandler{DB: db}
 	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
 	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
+	communityToolsTargetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsTargetsH))
 	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
 	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
+	mux.Handle("/api/v1/community-tools/resume/targets", communityToolsTargetsProtected)
+	mux.Handle("/api/v1/community-tools/resume/targets/", communityToolsTargetsProtected)
 
 	// CP-COMPLIANCE-REC-1: both routes are compliance.recording.manage-gated.
 	complianceRecH := &handlers.ComplianceRecordingHandler{DB: db}
