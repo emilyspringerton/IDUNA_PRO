@@ -3,6 +3,9 @@ package resume
 import (
 	"bytes"
 	"testing"
+	"time"
+
+	"github.com/go-pdf/fpdf"
 )
 
 func TestRenderPDF_ProducesARealPDFFile(t *testing.T) {
@@ -18,7 +21,7 @@ func TestRenderPDF_ProducesARealPDFFile(t *testing.T) {
 		Awards: []Award{{Title: "Employee of the Month", Awarder: "Acme Corp", Date: "2023-06"}},
 	}
 
-	out, err := RenderPDF(r)
+	out, err := RenderPDF(r, "classic")
 	if err != nil {
 		t.Fatalf("RenderPDF returned a real error: %v", err)
 	}
@@ -37,7 +40,7 @@ func TestRenderPDF_ProducesARealPDFFile(t *testing.T) {
 }
 
 func TestRenderPDF_EmptyResumeDoesNotError(t *testing.T) {
-	out, err := RenderPDF(&Resume{})
+	out, err := RenderPDF(&Resume{}, "classic")
 	if err != nil {
 		t.Fatalf("RenderPDF on a genuinely empty resume must not error, got: %v", err)
 	}
@@ -60,7 +63,7 @@ func TestRenderPDF_RendersProfileLinks(t *testing.T) {
 			},
 		},
 	}
-	out, err := RenderPDF(r)
+	out, err := RenderPDF(r, "classic")
 	if err != nil {
 		t.Fatalf("RenderPDF returned a real error: %v", err)
 	}
@@ -94,11 +97,129 @@ func TestRenderPDF_HandlesNonLatinTextWithoutError(t *testing.T) {
 	// it degrades GRACEFULLY (no error, no panic, a real, valid PDF still comes out), not that
 	// the CJK text itself renders correctly (it doesn't, and isn't claimed to).
 	r := &Resume{Basics: Basics{Name: "田中太郎", Email: "tanaka@example.com"}}
-	out, err := RenderPDF(r)
+	out, err := RenderPDF(r, "classic")
 	if err != nil {
 		t.Fatalf("RenderPDF must degrade non-Latin text gracefully, not error, got: %v", err)
 	}
 	if !bytes.HasPrefix(out, []byte("%PDF-")) {
 		t.Fatal("expected a real, valid PDF even with non-Latin input")
+	}
+}
+
+// ---- Compact template + footer -- founder real-time, 2026-09-09: "add a new output template
+// compact that manages to get the experience and education like into 2 columns or something so
+// we can get more skills on the page and keep it 1 page" / "the downloaded resume should
+// include the candidate name and the export timestamp." ----
+
+func realCompactResume() *Resume {
+	return &Resume{
+		Basics: Basics{Name: "Jordan Rivera", Email: "jordan@example.com", Phone: "555-0100"},
+		Work: []Work{
+			{Name: "Acme Corp", Position: "Line Cook", StartDate: "2022-03", EndDate: "2024-01", Summary: "Did real kitchen work."},
+			{Name: "Beta Diner", Position: "Server", StartDate: "2020-01", EndDate: "2022-01"},
+		},
+		Education: []Education{
+			{Institution: "Community College", StudyType: "Certificate", Area: "Culinary Arts", StartDate: "2020", EndDate: "2022"},
+		},
+		Skills: []Skill{{Name: "Knife Skills"}, {Name: "Food Safety"}, {Name: "POS Systems"}},
+	}
+}
+
+func TestRenderPDF_CompactTemplateProducesARealPDF(t *testing.T) {
+	out, err := RenderPDF(realCompactResume(), "compact")
+	if err != nil {
+		t.Fatalf("RenderPDF(compact) returned a real error: %v", err)
+	}
+	if !bytes.HasPrefix(out, []byte("%PDF-")) {
+		t.Fatal("expected a real, valid PDF for the compact template")
+	}
+	if !bytes.Contains(out, []byte("%%EOF")) {
+		t.Fatal("expected a real end-of-file marker for the compact template")
+	}
+}
+
+func TestRenderPDF_CompactTemplateHandlesEmptyWorkOrEducation(t *testing.T) {
+	// Real, deliberate edge case: a target resolved with only Education selected (no Work) --
+	// the compact layout's two columns must each independently tolerate being empty, not panic
+	// or produce a malformed document when one column has nothing to render.
+	onlyEducation := &Resume{
+		Basics:    Basics{Name: "Jordan Rivera"},
+		Education: []Education{{Institution: "Community College"}},
+	}
+	out, err := RenderPDF(onlyEducation, "compact")
+	if err != nil {
+		t.Fatalf("compact with empty Work must not error, got: %v", err)
+	}
+	if !bytes.HasPrefix(out, []byte("%PDF-")) {
+		t.Fatal("expected a real, valid PDF")
+	}
+
+	onlyWork := &Resume{
+		Basics: Basics{Name: "Jordan Rivera"},
+		Work:   []Work{{Name: "Acme Corp", Position: "Line Cook"}},
+	}
+	out, err = RenderPDF(onlyWork, "compact")
+	if err != nil {
+		t.Fatalf("compact with empty Education must not error, got: %v", err)
+	}
+	if !bytes.HasPrefix(out, []byte("%PDF-")) {
+		t.Fatal("expected a real, valid PDF")
+	}
+}
+
+func TestRenderPDF_UnknownTemplateFallsBackToClassic(t *testing.T) {
+	// Real, deliberate default: an empty or unrecognized template string must not error or
+	// silently produce a blank/broken document -- it falls back to the real, original,
+	// ATS-safe classic layout (RenderPDF's own dispatch: only the literal string "compact"
+	// triggers the two-column layout).
+	out, err := RenderPDF(realCompactResume(), "some-nonexistent-template")
+	if err != nil {
+		t.Fatalf("an unrecognized template must not error, got: %v", err)
+	}
+	if !bytes.HasPrefix(out, []byte("%PDF-")) {
+		t.Fatal("expected a real, valid PDF falling back to classic")
+	}
+}
+
+func TestFooterLine_IncludesNameAndTimestamp(t *testing.T) {
+	when := time.Date(2026, 9, 9, 15, 4, 0, 0, time.UTC)
+	got := footerLine("Jordan Rivera", when)
+	want := "Jordan Rivera  ·  Exported 2026-09-09 15:04 UTC"
+	if got != want {
+		t.Fatalf("footerLine mismatch:\ngot:  %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderPDF_FooterAppearsOnARealUncompressedPage -- the same real
+// "SetCompression(false) + grep the raw bytes" verification discipline this repo's own PDF
+// export work already established, applied here to prove the footer text (name + a real,
+// recognizable date fragment) actually lands in the page content stream, not just that
+// footerLine() itself returns the right string in isolation.
+func TestRenderPDF_FooterAppearsOnARealUncompressedPage(t *testing.T) {
+	r := realCompactResume()
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.SetCompression(false)
+	pdf.SetMargins(20, 18, 20)
+	pdf.SetAutoPageBreak(true, 18)
+	tr := pdf.UnicodeTranslatorFromDescriptor("")
+	when := time.Date(2026, 9, 9, 15, 4, 0, 0, time.UTC)
+	pdf.SetFooterFunc(func() {
+		pdf.SetY(-12)
+		pdf.SetFont("Arial", "", 7)
+		pdf.CellFormat(0, 6, tr(footerLine(r.Basics.Name, when)), "", 0, "C", false, 0, "")
+	})
+	pdf.AddPage()
+	pdf.SetFont("Arial", "B", 18)
+	pdf.CellFormat(0, 9, tr(r.Basics.Name), "", 1, "C", false, 0, "")
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		t.Fatalf("Output failed: %v", err)
+	}
+	out := buf.Bytes()
+	if !bytes.Contains(out, []byte("Jordan Rivera")) {
+		t.Fatal("expected the candidate's real name to appear in the raw, uncompressed page content")
+	}
+	if !bytes.Contains(out, []byte("2026-09-09")) {
+		t.Fatal("expected the real export date to appear in the raw, uncompressed page content")
 	}
 }

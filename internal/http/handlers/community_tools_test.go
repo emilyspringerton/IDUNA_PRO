@@ -438,11 +438,46 @@ func TestCommunityToolsExportHandler_ReturnsARealPDFFile(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); ct != "application/pdf" {
 		t.Errorf("expected Content-Type application/pdf, got %q", ct)
 	}
-	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="resume.pdf"`) {
-		t.Errorf("expected a real resume.pdf attachment filename, got %q", cd)
+	// Founder real-time, 2026-09-09: "the downloaded resume should include the candidate name
+	// and the export timestamp." Real, deliberate: the filename includes both, not just a
+	// generic "resume.pdf" -- checked as three real, separate substrings (name, "Resume", and
+	// today's real date) rather than one exact string, since the date is genuinely dynamic.
+	cd := rr.Header().Get("Content-Disposition")
+	today := time.Now().UTC().Format("2006-01-02")
+	if !strings.Contains(cd, "Jordan-Rivera") {
+		t.Errorf("expected the candidate's real name in the filename, got %q", cd)
+	}
+	if !strings.Contains(cd, "Resume") {
+		t.Errorf("expected \"Resume\" in the filename for a master export, got %q", cd)
+	}
+	if !strings.Contains(cd, today) {
+		t.Errorf("expected today's real export date (%s) in the filename, got %q", today, cd)
 	}
 	if !bytes.HasPrefix(rr.Body.Bytes(), []byte("%PDF-")) {
 		t.Fatal("expected the real, downloaded body to be a genuine PDF file (starts with %PDF-)")
+	}
+}
+
+// TestCommunityToolsExportHandler_TemplateQueryParamSelectsCompactLayout -- founder real-time,
+// 2026-09-09: "add a new output template compact that manages to get the experience and
+// education like into 2 columns or something." Proves the query param actually reaches
+// resume.RenderPDF's own template dispatch, end to end through the real HTTP handler -- not
+// just that RenderPDF itself accepts a template argument in isolation.
+func TestCommunityToolsExportHandler_TemplateQueryParamSelectsCompactLayout(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, _, export, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	saveMasterResumeWithTwoJobs(t, crud, token)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/export.pdf?template=compact", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	export.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.HasPrefix(rr.Body.Bytes(), []byte("%PDF-")) {
+		t.Fatal("expected a genuine PDF file for the compact template")
 	}
 }
 

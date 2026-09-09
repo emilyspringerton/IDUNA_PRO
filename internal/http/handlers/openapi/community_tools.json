@@ -144,7 +144,7 @@
       "get": {
         "operationId": "exportResumePDF",
         "summary": "Download a real, ATS-safe PDF of the master resume",
-        "description": "A plain, single-column, genuinely selectable-text PDF (never an image). The response Content-Disposition header carries the real, sanitized filename to use.\n",
+        "description": "A plain, single-column, genuinely selectable-text PDF (never an image). The response Content-Disposition header carries the real, sanitized filename to use.\n The filename includes the candidate's real name and the real export date; the page itself carries a real footer with the candidate's name and the exact export timestamp.",
         "responses": {
           "200": {
             "description": "A real PDF file",
@@ -163,7 +163,23 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "template",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "classic",
+                "compact"
+              ],
+              "default": "classic"
+            },
+            "description": "classic (default): one plain, single-column, ATS-safe layout. compact: Experience and Education render side by side to fit more content on one page -- a real, opt-in trade-off against the same ATS multi-column parsing risk classic exists to avoid."
+          }
+        ]
       }
     },
     "/resume/work": {
@@ -833,6 +849,20 @@
         "parameters": [
           {
             "$ref": "#/components/parameters/TargetId"
+          },
+          {
+            "name": "template",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "classic",
+                "compact"
+              ],
+              "default": "classic"
+            },
+            "description": "classic (default): one plain, single-column, ATS-safe layout. compact: Experience and Education render side by side to fit more content on one page -- a real, opt-in trade-off against the same ATS multi-column parsing risk classic exists to avoid."
           }
         ],
         "responses": {
@@ -856,7 +886,8 @@
           "404": {
             "$ref": "#/components/responses/NotFound"
           }
-        }
+        },
+        "description": " The filename includes the candidate's real name and the real export date; the page itself carries a real footer with the candidate's name and the exact export timestamp."
       }
     },
     "/resume/profiles": {

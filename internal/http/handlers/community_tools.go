@@ -408,21 +408,43 @@ func (h *CommunityToolsExportHandler) ServeHTTP(w http.ResponseWriter, r *http.R
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	writeResumePDF(w, res, "resume")
+	writeResumePDF(w, res, resumeExportBaseName(res.Basics.Name, "Resume"), r.URL.Query().Get("template"))
+}
+
+// resumeExportBaseName -- founder real-time, 2026-09-09: "the downloaded resume should include
+// the candidate name and the export timestamp." Real, deliberate scope split from the PDF's own
+// new footer (pdf.go's footerLine, which repeats on every PAGE): this is what shows up in the
+// FILENAME the moment the file lands on someone's disk, so a downloaded copy is still
+// identifiable by name alone even before it's opened, and multiple downloads (a master export
+// plus several Target exports) don't collide or read as anonymous "resume.pdf"/"Kitchen Jobs
+// Special.pdf" files with no indication of whose they are. `suffix` is "Resume" for the master
+// export or a Target's own real name for a bespoke export — pdfFilename below still owns final
+// sanitization (never trust `candidateName`/`suffix` directly in a response header).
+func resumeExportBaseName(candidateName, suffix string) string {
+	parts := make([]string, 0, 3)
+	if candidateName != "" {
+		parts = append(parts, candidateName)
+	}
+	if suffix != "" {
+		parts = append(parts, suffix)
+	}
+	parts = append(parts, time.Now().UTC().Format("2006-01-02"))
+	return strings.Join(parts, " ")
 }
 
 // writeResumePDF -- the one real, shared render-and-respond step both CommunityToolsExportHandler
 // (master resume) and CommunityToolsTargetsHandler's own export.pdf sub-route (a resolved
-// target) reduce to. `baseName` is a plain, human name (e.g. a Target's own real, user-
-// controlled `Name` field) with NO extension — pdfFilename below owns turning it into a real,
-// safe, complete "*.pdf" filename. Real, deliberate, found-before-shipping caution: a
+// target) reduce to. `baseName` is a plain, human name (e.g. resumeExportBaseName's own output)
+// with NO extension — pdfFilename below owns turning it into a real, safe, complete "*.pdf"
+// filename. `template` is passed straight through to resume.RenderPDF ("" / "classic" /
+// "compact" — see its own doc comment). Real, deliberate, found-before-shipping caution: a
 // Target's own real, user-controlled name (e.g. one containing a literal `"` or newline)
 // going straight into an HTTP response header value is a real header-injection/malformed-
 // response risk, the identical class of bug this same session's own console.html work already
 // found and fixed once (esc() into an HTML attribute) — caught here by reasoning about it
 // directly before it ever shipped, not found live.
-func writeResumePDF(w http.ResponseWriter, res *resume.Resume, baseName string) {
-	pdfBytes, err := resume.RenderPDF(res)
+func writeResumePDF(w http.ResponseWriter, res *resume.Resume, baseName, template string) {
+	pdfBytes, err := resume.RenderPDF(res, template)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -439,15 +461,26 @@ func writeResumePDF(w http.ResponseWriter, res *resume.Resume, baseName string) 
 // — never taken from caller input, so the result is always a real, valid, single-extension
 // filename regardless of what's in `base`. Falls back to the real, safe default "resume.pdf"
 // if the sanitized result is empty (a name that was ENTIRELY unsafe characters, e.g. all
-// emoji) or absurdly long (a real, honest DoS-shaped guard, not just a cosmetic one).
+// emoji) or absurdly long (a real, honest DoS-shaped guard, not just a cosmetic one). Real,
+// deliberate collapsing of consecutive hyphens (e.g. a space right next to an already-hyphenated
+// character) into one — a cosmetic-but-real cleanup, since resumeExportBaseName's own
+// space-joined "name suffix date" convention would otherwise produce ugly double hyphens.
 func pdfFilename(base string) string {
 	var b strings.Builder
+	lastWasHyphen := false
 	for _, r := range base {
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 			b.WriteRune(r)
+			lastWasHyphen = false
+		case r == '-', r == '_':
+			b.WriteRune(r)
+			lastWasHyphen = r == '-'
 		default:
-			b.WriteRune('-')
+			if !lastWasHyphen {
+				b.WriteRune('-')
+				lastWasHyphen = true
+			}
 		}
 		if b.Len() >= 80 {
 			break
@@ -730,7 +763,8 @@ func (h *CommunityToolsTargetsHandler) exportTarget(w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "target not found"})
 		return
 	}
-	writeResumePDF(w, resume.Resolve(master, target), target.Name)
+	resolved := resume.Resolve(master, target)
+	writeResumePDF(w, resolved, resumeExportBaseName(resolved.Basics.Name, target.Name), r.URL.Query().Get("template"))
 }
 
 func loadMasterAndTarget(ctx context.Context, db *sql.DB, uid int, targetID string) (*resume.Resume, *resume.Target, error) {
