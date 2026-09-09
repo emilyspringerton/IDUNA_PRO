@@ -369,11 +369,19 @@ func main() {
 	// (.../targets/{id}/resolved, .../targets/{id}/verify) into this one handler's own internal
 	// path parsing -- see its own ServeHTTP doc comment.
 	communityToolsTargetsH := &handlers.CommunityToolsTargetsHandler{DB: db}
+	// CommunityToolsExportHandler (2026-09-09, same day) -- the real "Layer 3" downloadable,
+	// ATS-safe PDF file (console.html's own "Preview & templates" panel was screen-only). Target
+	// resumes get their own PDF via the existing .../targets/{id}/export.pdf sub-route inside
+	// CommunityToolsTargetsHandler (already registered below via the trailing-slash prefix) --
+	// only the master resume's own export.pdf needs a new top-level route here.
+	communityToolsExportH := &handlers.CommunityToolsExportHandler{DB: db}
 	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
 	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
 	communityToolsTargetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsTargetsH))
+	communityToolsExportProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsExportH))
 	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
 	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
+	mux.Handle("/api/v1/community-tools/resume/export.pdf", communityToolsExportProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets", communityToolsTargetsProtected)
 	mux.Handle("/api/v1/community-tools/resume/targets/", communityToolsTargetsProtected)
 

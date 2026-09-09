@@ -56,8 +56,24 @@ data model + a real, itemized 2-layer verify function); `internal/http/handlers/
 community_tools.go` (`GET`/`PUT /api/v1/community-tools/resume`,
 `POST /api/v1/community-tools/resume/verify`, scoped to the caller's own `local_uid`, no
 cross-user path). See `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` for the full design.
-Live-verified: fresh-SQLite boot, the new migration applies cleanly, `/health` OK. No frontend UI
-yet.
+Live-verified: fresh-SQLite boot, the new migration applies cleanly, `/health` OK. Frontend UI
+lives in `CarePyre/console.html`.
+
+**Real, shipped same day**: named Target resume variants (`internal/resume/target.go`,
+`GET`/`PUT /api/v1/community-tools/resume/targets`, `.../targets/{id}/resolved`,
+`.../targets/{id}/verify`) — bespoke, tailored show/hide selections over the master's own real
+Work/Education/Skill/Award entries plus optional summary/headline overrides, never a duplicate of
+the underlying data.
+
+**Real, shipped same day (Layer 3 PDF export)**: `internal/resume/pdf.go`'s `RenderPDF` — a real,
+downloadable, ATS-safe PDF file (`github.com/go-pdf/fpdf`, pure Go, no cgo), closing the gap this
+feature named honestly as not-done when its screen-only preview templates first shipped. Two
+routes: `GET .../resume/export.pdf` (master) and `GET .../resume/targets/{id}/export.pdf` (a
+resolved Target). A found-before-shipping header-injection risk (a Target's own user-controlled
+`Name` going straight into the `Content-Disposition` header) was closed with an allowlist
+filename sanitizer (`pdfFilename`) — live-verified against a real fresh-SQLite-booted binary,
+including a target literally named `Kitchen Jobs "Special"` to confirm the header stays
+well-formed. See `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4d for the full writeup.
 
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:

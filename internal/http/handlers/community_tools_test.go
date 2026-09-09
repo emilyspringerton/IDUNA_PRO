@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 // pattern for a bearer-token-gated handler (mail_accounts_test.go's own newTestMailAccountsHandler
 // shape).
 
-func newTestCommunityToolsHandlers(t *testing.T, keys *jwt.Keys) (http.Handler, http.Handler, http.Handler, *sql.DB) {
+func newTestCommunityToolsHandlers(t *testing.T, keys *jwt.Keys) (http.Handler, http.Handler, http.Handler, http.Handler, *sql.DB) {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -48,10 +49,12 @@ func newTestCommunityToolsHandlers(t *testing.T, keys *jwt.Keys) (http.Handler, 
 	crud := &handlers.CommunityToolsHandler{DB: db}
 	verify := &handlers.CommunityToolsVerifyHandler{DB: db}
 	targets := &handlers.CommunityToolsTargetsHandler{DB: db}
+	export := &handlers.CommunityToolsExportHandler{DB: db}
 	crudProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(crud))
 	verifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(verify))
 	targetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(targets))
-	return crudProtected, verifyProtected, targetsProtected, db
+	exportProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(export))
+	return crudProtected, verifyProtected, targetsProtected, exportProtected, db
 }
 
 func communityToolsToken(t *testing.T, keys *jwt.Keys, localUID int, perms ...string) string {
@@ -73,7 +76,7 @@ func communityToolsToken(t *testing.T, keys *jwt.Keys, localUID int, perms ...st
 
 func TestCommunityToolsHandler_ForbiddenWithoutFlag(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, _, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, _, _, _ := newTestCommunityToolsHandlers(t, keys)
 	// No "community-tools.access" permission -- the real, direct consequence of
 	// IsCommunityToolsEnabled being false/unset on this account.
 	token := communityToolsToken(t, keys, 1)
@@ -89,7 +92,7 @@ func TestCommunityToolsHandler_ForbiddenWithoutFlag(t *testing.T) {
 
 func TestCommunityToolsHandler_GetWithNoSavedResumeReturnsEmptyShell(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, _, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, _, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume", nil)
@@ -110,7 +113,7 @@ func TestCommunityToolsHandler_GetWithNoSavedResumeReturnsEmptyShell(t *testing.
 
 func TestCommunityToolsHandler_PutThenGetRoundTrips(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, _, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, _, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 
 	body, _ := json.Marshal(resume.Resume{
@@ -139,7 +142,7 @@ func TestCommunityToolsHandler_PutThenGetRoundTrips(t *testing.T) {
 
 func TestCommunityToolsHandler_PutIsScopedToCallerOwnUID(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, _, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, _, _, _ := newTestCommunityToolsHandlers(t, keys)
 	tokenA := communityToolsToken(t, keys, 1, "community-tools.access")
 	tokenB := communityToolsToken(t, keys, 2, "community-tools.access")
 
@@ -163,7 +166,7 @@ func TestCommunityToolsHandler_PutIsScopedToCallerOwnUID(t *testing.T) {
 
 func TestCommunityToolsVerifyHandler_RealRoundTrip(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, verify, _, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, verify, _, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 
 	// An incomplete resume (no phone, no work/education) should fail real verification.
@@ -222,7 +225,7 @@ func saveMasterResumeWithTwoJobs(t *testing.T, crud http.Handler, token string) 
 
 func TestCommunityToolsTargetsHandler_ForbiddenWithoutFlag(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	_, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets", nil)
@@ -236,7 +239,7 @@ func TestCommunityToolsTargetsHandler_ForbiddenWithoutFlag(t *testing.T) {
 
 func TestCommunityToolsTargetsHandler_ListWithNoneSavedReturnsEmptyList(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	_, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets", nil)
@@ -257,7 +260,7 @@ func TestCommunityToolsTargetsHandler_ListWithNoneSavedReturnsEmptyList(t *testi
 
 func TestCommunityToolsTargetsHandler_ReplaceAssignsIDsAndPersists(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 	master := saveMasterResumeWithTwoJobs(t, crud, token)
 
@@ -294,7 +297,7 @@ func TestCommunityToolsTargetsHandler_ReplaceAssignsIDsAndPersists(t *testing.T)
 
 func TestCommunityToolsTargetsHandler_ResolvedReturnsOnlySelectedEntries(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 	master := saveMasterResumeWithTwoJobs(t, crud, token)
 
@@ -330,7 +333,7 @@ func TestCommunityToolsTargetsHandler_ResolvedReturnsOnlySelectedEntries(t *test
 
 func TestCommunityToolsTargetsHandler_ResolvedUnknownIDReturns404(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	_, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets/does-not-exist/resolved", nil)
@@ -344,7 +347,7 @@ func TestCommunityToolsTargetsHandler_ResolvedUnknownIDReturns404(t *testing.T) 
 
 func TestCommunityToolsTargetsHandler_VerifyRunsAgainstResolvedNotMaster(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	crud, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	crud, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	token := communityToolsToken(t, keys, 1, "community-tools.access")
 	// The master resume passes verification for real (both work entries present, all
 	// required fields filled) -- saveMasterResumeWithTwoJobs already establishes that.
@@ -380,7 +383,7 @@ func TestCommunityToolsTargetsHandler_VerifyRunsAgainstResolvedNotMaster(t *test
 
 func TestCommunityToolsTargetsHandler_TargetsAreScopedToCallerOwnUID(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
-	_, _, targets, _ := newTestCommunityToolsHandlers(t, keys)
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
 	tokenA := communityToolsToken(t, keys, 1, "community-tools.access")
 	tokenB := communityToolsToken(t, keys, 2, "community-tools.access")
 
@@ -399,5 +402,94 @@ func TestCommunityToolsTargetsHandler_TargetsAreScopedToCallerOwnUID(t *testing.
 	}
 	if len(listedB) != 0 {
 		t.Fatalf("a real, distinct user's own target list must never see another user's saved targets, got: %+v", listedB)
+	}
+}
+
+// ---- PDF export tests -- the real "Layer 3" downloadable, ATS-safe file (console.html's own
+// "Preview & templates" panel is screen-only). ----
+
+func TestCommunityToolsExportHandler_ForbiddenWithoutFlag(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, _, export, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/export.pdf", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	export.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 without community-tools.access, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCommunityToolsExportHandler_ReturnsARealPDFFile(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, _, export, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	saveMasterResumeWithTwoJobs(t, crud, token)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/export.pdf", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	export.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Errorf("expected Content-Type application/pdf, got %q", ct)
+	}
+	if cd := rr.Header().Get("Content-Disposition"); !strings.Contains(cd, `filename="resume.pdf"`) {
+		t.Errorf("expected a real resume.pdf attachment filename, got %q", cd)
+	}
+	if !bytes.HasPrefix(rr.Body.Bytes(), []byte("%PDF-")) {
+		t.Fatal("expected the real, downloaded body to be a genuine PDF file (starts with %PDF-)")
+	}
+}
+
+func TestCommunityToolsTargetsHandler_ExportReturnsPDFOfResolvedView(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	crud, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+	saveMasterResumeWithTwoJobs(t, crud, token)
+
+	body, _ := json.Marshal([]resume.Target{{Name: "My Target \"Name\""}})
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/community-tools/resume/targets", bytes.NewReader(body))
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putRR := httptest.NewRecorder()
+	targets.ServeHTTP(putRR, putReq)
+	var saved []resume.Target
+	json.Unmarshal(putRR.Body.Bytes(), &saved)
+	targetID := saved[0].ID
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets/"+targetID+"/export.pdf", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	targets.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !bytes.HasPrefix(rr.Body.Bytes(), []byte("%PDF-")) {
+		t.Fatal("expected a genuine PDF file for the resolved target view")
+	}
+	// Real, deliberate regression check for the header-injection risk this handler's own
+	// pdfFilename sanitizer exists to close: a target name containing a literal quote must
+	// never produce a malformed/broken-out-of Content-Disposition header.
+	cd := rr.Header().Get("Content-Disposition")
+	if strings.Count(cd, `"`) != 2 {
+		t.Fatalf("expected exactly one real, well-formed quoted filename in Content-Disposition, got: %q", cd)
+	}
+}
+
+func TestCommunityToolsTargetsHandler_ExportUnknownIDReturns404(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	_, _, targets, _, _ := newTestCommunityToolsHandlers(t, keys)
+	token := communityToolsToken(t, keys, 1, "community-tools.access")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/community-tools/resume/targets/does-not-exist/export.pdf", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	targets.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown target ID, got %d: %s", rr.Code, rr.Body.String())
 	}
 }
