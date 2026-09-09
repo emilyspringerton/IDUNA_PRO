@@ -39,6 +39,17 @@ type LocalUser struct {
 	// (the "providers.manage" permission).
 	IsOperatorAdmin bool
 	IsProviderAdmin bool
+	// IsCommunityToolsEnabled -- founder real-time, 2026-09-09: a real, per-account feature
+	// flag, deliberately SEPARATE from the 4-tier admin/provider RBAC hierarchy above (Top
+	// Admin/Operator Admin/Provider Admin/Provider Operator are all staff-tier roles; this
+	// flag is for ORDINARY community-participant accounts, gating "community tools" -- v0's
+	// own real first one is the resume/CV builder, internal/http/handlers/
+	// community_tools.go). Same real DB-backed bool / grant-event / PATCH-API pattern
+	// IsAdmin/IsProvider already established (see localUserPermissions in
+	// internal/http/handlers/local_auth.go for how this becomes the real
+	// "community-tools.access" permission), granted by any users.admin holder -- no separate
+	// grant-UI/permission needed, since it's a plain per-account toggle, not a new admin tier.
+	IsCommunityToolsEnabled bool
 	// OrgID -- CP-HIPAA-3 (founder real-time: "there may be a several organizations who have
 	// service agreements with each other... the admins from that collective should be able to
 	// administer participants from that cluster of providers"). Dual real meaning by role, same
@@ -109,6 +120,10 @@ const (
 	// RBAC tiers. Same grant/revoke-in-one-event-type shape as the two above.
 	EventUserOperatorAdminChanged = "local_user.operator_admin_changed"
 	EventUserProviderAdminChanged = "local_user.provider_admin_changed"
+	// EventUserCommunityToolsChanged -- founder real-time, 2026-09-09. Same grant/revoke-in-
+	// one-event-type shape as the tiers above, gating a plain per-account feature flag rather
+	// than an RBAC tier (see LocalUser.IsCommunityToolsEnabled's own doc comment).
+	EventUserCommunityToolsChanged = "local_user.community_tools_changed"
 	// EventUserOrgChanged -- CP-HIPAA-3. An admin (re)assigning an existing user's organization
 	// after the fact, distinct from the "stamped automatically at creation" path
 	// (UserCreatedData.OrgID) -- e.g. correcting a mis-onboarded participant, or moving a
@@ -165,6 +180,11 @@ type UserOperatorAdminChangedData struct {
 type UserProviderAdminChangedData struct {
 	LocalUID        int  `json:"local_uid"`
 	IsProviderAdmin bool `json:"is_provider_admin"`
+}
+
+type UserCommunityToolsChangedData struct {
+	LocalUID                int  `json:"local_uid"`
+	IsCommunityToolsEnabled bool `json:"is_community_tools_enabled"`
 }
 
 type UserOrgChangedData struct {

@@ -249,6 +249,13 @@ type updateUserRequest struct {
 	// cluster-trust SCOPE, a real, deliberate distinction from is_admin/is_operator_admin/
 	// is_provider_admin above).
 	OrgID *int `json:"org_id,omitempty"`
+	// IsCommunityToolsEnabled -- founder real-time, 2026-09-09: the real, plain per-account
+	// feature flag gating "community tools" (the resume/CV builder, v0's own real first one).
+	// Settable by users.admin, same as ordinary user management -- deliberately NOT
+	// admins.manage-gated, since it grants no elevated RBAC tier, only access to one
+	// participant-facing feature (the same real distinction OrgID's own doc comment already
+	// draws for cluster-trust scope vs. permission tier).
+	IsCommunityToolsEnabled *bool `json:"is_community_tools_enabled,omitempty"`
 }
 
 func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid int) {
@@ -300,6 +307,14 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 	// changing which org someone belongs to is real, internal platform-operator bookkeeping.
 	if req.OrgID != nil && !isUsersAdmin {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only an admin can reassign a user's organization"})
+		return
+	}
+
+	// IsCommunityToolsEnabled -- founder real-time, 2026-09-09: users.admin-gated, same tier as
+	// OrgID above (it grants no elevated RBAC tier, only access to one participant-facing
+	// feature -- see updateUserRequest's own doc comment on this field).
+	if req.IsCommunityToolsEnabled != nil && !isUsersAdmin {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: only an admin can change a user's community-tools access"})
 		return
 	}
 
@@ -542,6 +557,29 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		ev := userlog.Event{
 			ID:          uuid.New().String(),
 			Type:        userlog.EventUserOrgChanged,
+			Source:      "idunapro/api",
+			OccurredAt:  now,
+			OperatorUID: operatorUID,
+			Data:        json.RawMessage(payload),
+		}
+		recs, err := h.Log.Append(ctx, ev)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		_ = h.Proj.Apply(ctx, recs[0])
+		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
+	}
+
+	// Community-tools feature flag grant/revoke. users.admin-gated -- already enforced above.
+	if req.IsCommunityToolsEnabled != nil {
+		payload, _ := json.Marshal(userlog.UserCommunityToolsChangedData{
+			LocalUID:                uid,
+			IsCommunityToolsEnabled: *req.IsCommunityToolsEnabled,
+		})
+		ev := userlog.Event{
+			ID:          uuid.New().String(),
+			Type:        userlog.EventUserCommunityToolsChanged,
 			Source:      "idunapro/api",
 			OccurredAt:  now,
 			OperatorUID: operatorUID,

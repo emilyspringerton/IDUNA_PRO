@@ -160,13 +160,14 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //     (mail-accounts.provision, sip-accounts.provision), scoped server-side to participants they
 //     themselves created.
 func localUserPermissions(u *userlog.LocalUser) []string {
+	var perms []string
 	// CP-SIP-ADMIN-124323 ("admin genesis"): u.IsAdmin is the real, general, DB-backed grant
 	// path -- uid=0 (webmaster) still always gets this same set automatically (backward
 	// compatible with every deployment before this field existed), but it's no longer the
 	// ONLY way in. See the LocalUser.IsAdmin field's own doc comment for how a grant actually
 	// happens (idunapro admin-grant <email> for the first one, the real API after that).
 	if u.LocalUID == 0 || u.IsAdmin {
-		return append(operatorAdminPermissions(),
+		perms = append(operatorAdminPermissions(),
 			// admins.manage -- CP-HIPAA-2: the one permission Operator Admin never gets. Gates
 			// every mutation (status/password/role-flag change, delete) whose TARGET is itself
 			// Top or Operator Admin -- see users.go's own tierGuard.
@@ -181,28 +182,39 @@ func localUserPermissions(u *userlog.LocalUser) []string {
 			// rewrite of this gate.
 			"contacts.manage",
 		)
+	} else if u.IsOperatorAdmin {
+		perms = operatorAdminPermissions()
+	} else {
+		base := []string{"iduna.me.read", "users.read.self", "devportal.access"}
+		// mail-accounts.provision / sip-accounts.provision -- CP-HIPAA-1/CP-HIPAA-2 ("we can
+		// allow providers to create email accounts for participants" / "give the same treatment
+		// for sip"). A real, least-privilege grant distinct from the admin tiers above: a
+		// provider can provision/manage participant mailboxes and SIP extensions
+		// (MailAccountsHandler, SipAccountsHandler) but gets none of users.admin's other
+		// console-wide capabilities (kanban, mailing list, Twilio, user management itself).
+		if u.IsProviderAdmin {
+			base = append(base, "mail-accounts.provision", "sip-accounts.provision",
+				// providers.manage -- CP-HIPAA-2: lets a Provider Admin grant/revoke IsProvider
+				// (Provider Operator) on other users -- see users.go's own updateUser. Granting
+				// Provider ADMIN itself stays admins.manage-gated (Top Admin only), same caution
+				// as granting Top/Operator Admin.
+				"providers.manage")
+		} else if u.IsProvider {
+			base = append(base, "mail-accounts.provision", "sip-accounts.provision")
+		}
+		perms = base
 	}
-	if u.IsOperatorAdmin {
-		return operatorAdminPermissions()
+	// community-tools.access -- founder real-time, 2026-09-09: "build it into carepyre...
+	// community tools... gated so that accounts need a feature flag set." A plain per-account
+	// toggle (LocalUser.IsCommunityToolsEnabled), checked independently of tier -- deliberately
+	// NOT folded into any tier's own default set above, so an admin who wants personal access to
+	// a community tool (the resume/CV builder, v0's own real first one) needs the identical flag
+	// set on their own account too, the same as any ordinary participant. Real, honest, literal
+	// reading of "accounts need a feature flag set" -- no tier gets it implicitly.
+	if u.IsCommunityToolsEnabled {
+		perms = append(perms, "community-tools.access")
 	}
-	base := []string{"iduna.me.read", "users.read.self", "devportal.access"}
-	// mail-accounts.provision / sip-accounts.provision -- CP-HIPAA-1/CP-HIPAA-2 ("we can allow
-	// providers to create email accounts for participants" / "give the same treatment for
-	// sip"). A real, least-privilege grant distinct from the admin tiers above: a provider can
-	// provision/manage participant mailboxes and SIP extensions (MailAccountsHandler,
-	// SipAccountsHandler) but gets none of users.admin's other console-wide capabilities
-	// (kanban, mailing list, Twilio, user management itself).
-	if u.IsProviderAdmin {
-		base = append(base, "mail-accounts.provision", "sip-accounts.provision",
-			// providers.manage -- CP-HIPAA-2: lets a Provider Admin grant/revoke IsProvider
-			// (Provider Operator) on other users -- see users.go's own updateUser. Granting
-			// Provider ADMIN itself stays admins.manage-gated (Top Admin only), same caution as
-			// granting Top/Operator Admin.
-			"providers.manage")
-	} else if u.IsProvider {
-		base = append(base, "mail-accounts.provision", "sip-accounts.provision")
-	}
-	return base
+	return perms
 }
 
 // operatorAdminPermissions is the full admin capability set MINUS admins.manage -- shared by

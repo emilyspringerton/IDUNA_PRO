@@ -31,8 +31,8 @@ func (p *SQLiteProjector) Apply(ctx context.Context, rec Record) error {
 		now := rec.AppendedAt.Format(time.RFC3339)
 		_, err := p.db.ExecContext(ctx,
 			`INSERT OR IGNORE INTO local_users
-			 (local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, 'active', 0, 0, 0, 0, ?, ?, ?)`,
+			 (local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, is_community_tools_enabled, org_id, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, 'active', 0, 0, 0, 0, 0, ?, ?, ?)`,
 			d.LocalUID, d.Email, d.DisplayName, d.PasswordHash, d.OrgID, now, now,
 		)
 		return err
@@ -133,6 +133,18 @@ func (p *SQLiteProjector) Apply(ctx context.Context, rec Record) error {
 		)
 		return err
 
+	case EventUserCommunityToolsChanged:
+		var d UserCommunityToolsChangedData
+		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
+			return fmt.Errorf("sqlite projector apply community_tools_changed: %w", err)
+		}
+		now := rec.AppendedAt.Format(time.RFC3339)
+		_, err := p.db.ExecContext(ctx,
+			`UPDATE local_users SET is_community_tools_enabled=?, updated_at=? WHERE local_uid=?`,
+			d.IsCommunityToolsEnabled, now, d.LocalUID,
+		)
+		return err
+
 	case EventUserOrgChanged:
 		var d UserOrgChangedData
 		if err := json.Unmarshal(rec.Event.Data, &d); err != nil {
@@ -182,7 +194,7 @@ func (p *SQLiteProjector) AdvanceCursor(ctx context.Context, seq uint64) error {
 
 func (p *SQLiteProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, is_community_tools_enabled, org_id, created_at, updated_at
 		 FROM local_users WHERE local_uid=? AND status != 'deleted'`,
 		uid,
 	))
@@ -190,14 +202,14 @@ func (p *SQLiteProjector) GetByUID(ctx context.Context, uid int) (*LocalUser, er
 
 func (p *SQLiteProjector) GetByEmail(ctx context.Context, email string) (*LocalUser, error) {
 	return p.scanUser(p.db.QueryRowContext(ctx,
-		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
+		`SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, is_community_tools_enabled, org_id, created_at, updated_at
 		 FROM local_users WHERE email=? AND status != 'deleted'`,
 		email,
 	))
 }
 
 func (p *SQLiteProjector) ListUsers(ctx context.Context, limit int) ([]LocalUser, error) {
-	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, org_id, created_at, updated_at
+	q := `SELECT local_uid, email, display_name, password_hash, status, is_admin, is_provider, is_operator_admin, is_provider_admin, is_community_tools_enabled, org_id, created_at, updated_at
 	      FROM local_users WHERE status != 'deleted' ORDER BY local_uid ASC`
 	var rows *sql.Rows
 	var err error
@@ -236,11 +248,11 @@ func (p *SQLiteProjector) ScrubPII(ctx context.Context, uid int) error {
 
 func (p *SQLiteProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	var u LocalUser
-	var isAdmin, isProvider, isOperatorAdmin, isProviderAdmin int
+	var isAdmin, isProvider, isOperatorAdmin, isProviderAdmin, isCommunityToolsEnabled int
 	var createdStr, updatedStr string
 	err := row.Scan(
 		&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
-		&isOperatorAdmin, &isProviderAdmin, &u.OrgID, &createdStr, &updatedStr,
+		&isOperatorAdmin, &isProviderAdmin, &isCommunityToolsEnabled, &u.OrgID, &createdStr, &updatedStr,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -252,6 +264,7 @@ func (p *SQLiteProjector) scanUser(row *sql.Row) (*LocalUser, error) {
 	u.IsProvider = isProvider != 0
 	u.IsOperatorAdmin = isOperatorAdmin != 0
 	u.IsProviderAdmin = isProviderAdmin != 0
+	u.IsCommunityToolsEnabled = isCommunityToolsEnabled != 0
 	u.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
 	u.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
 	return &u, nil
@@ -261,11 +274,11 @@ func (p *SQLiteProjector) scanRows(rows *sql.Rows) ([]LocalUser, error) {
 	var out []LocalUser
 	for rows.Next() {
 		var u LocalUser
-		var isAdmin, isProvider, isOperatorAdmin, isProviderAdmin int
+		var isAdmin, isProvider, isOperatorAdmin, isProviderAdmin, isCommunityToolsEnabled int
 		var createdStr, updatedStr string
 		if err := rows.Scan(
 			&u.LocalUID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Status, &isAdmin, &isProvider,
-			&isOperatorAdmin, &isProviderAdmin, &u.OrgID, &createdStr, &updatedStr,
+			&isOperatorAdmin, &isProviderAdmin, &isCommunityToolsEnabled, &u.OrgID, &createdStr, &updatedStr,
 		); err != nil {
 			return nil, err
 		}
@@ -273,6 +286,7 @@ func (p *SQLiteProjector) scanRows(rows *sql.Rows) ([]LocalUser, error) {
 		u.IsProvider = isProvider != 0
 		u.IsOperatorAdmin = isOperatorAdmin != 0
 		u.IsProviderAdmin = isProviderAdmin != 0
+		u.IsCommunityToolsEnabled = isCommunityToolsEnabled != 0
 		u.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
 		u.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
 		out = append(out, u)

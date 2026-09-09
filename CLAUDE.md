@@ -47,6 +47,18 @@ Not yet built: the extensibility hook contract (PARENA mods via `burrow build`),
 an online editor, `console.okemily.com`, or the tenant-provisioning control plane (all real,
 separately scoped in the NORTHSTAR doc above).
 
+**Real, shipped (2026-09-09)**: Community Tools — CarePyre's own real, gated feature area
+(founder real-time: "build it into carepyre... community tools... gated so that accounts need a
+feature flag set"). New `LocalUser.IsCommunityToolsEnabled` (a plain, per-account feature flag,
+deliberately separate from the 4-tier admin/provider RBAC), driving a new
+`"community-tools.access"` permission; `internal/resume` (a real JSON Resume-schema-mirrored Go
+data model + a real, itemized 2-layer verify function); `internal/http/handlers/
+community_tools.go` (`GET`/`PUT /api/v1/community-tools/resume`,
+`POST /api/v1/community-tools/resume/verify`, scoped to the caller's own `local_uid`, no
+cross-user path). See `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` for the full design.
+Live-verified: fresh-SQLite boot, the new migration applies cleanly, `/health` OK. No frontend UI
+yet.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),

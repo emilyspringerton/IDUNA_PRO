@@ -355,6 +355,18 @@ func main() {
 	mux.Handle("PUT /api/v1/branding",
 		middleware.RequireAuth(keys)(middleware.RequirePermission("branding.admin")(http.HandlerFunc(brandingH.Put))))
 
+	// Community Tools (founder real-time, 2026-09-09: "build it into carepyre... community
+	// tools... gated so that accounts need a feature flag set"). v0's own real first tool: a
+	// resume/CV builder + verifier. community-tools.access-gated -- itself driven by
+	// LocalUser.IsCommunityToolsEnabled, a plain per-account admin-settable flag (see
+	// localUserPermissions), deliberately separate from the 4-tier admin/provider RBAC above.
+	communityToolsH := &handlers.CommunityToolsHandler{DB: db}
+	communityToolsVerifyH := &handlers.CommunityToolsVerifyHandler{DB: db}
+	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
+	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
+	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
+	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
+
 	// CP-COMPLIANCE-REC-1: both routes are compliance.recording.manage-gated.
 	complianceRecH := &handlers.ComplianceRecordingHandler{DB: db}
 	complianceRecProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("compliance.recording.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
