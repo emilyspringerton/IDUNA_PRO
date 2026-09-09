@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-09
+- Community Tools: real, downloadable ATS-safe PDF export (Layer 3) -- internal/resume/pdf.go (github.com/go-pdf/fpdf, no cgo), GET .../resume/export.pdf and .../targets/{id}/export.pdf, header-injection-safe pdfFilename sanitizer, 16 new tests, live-verified against a fresh-SQLite-booted binary. Apple #18738. (sess-20260905-0720-ec33e7c5)
 - feat(community-tools): real Target resumes -- bespoke, tailored variants per opportunity. Work/Education/Skill/Award get stable IDs; new Target{IncludedXIDs, SummaryOverride, LabelOverride} + Resolve(master, target). New /targets, /targets/{id}/resolved, /targets/{id}/verify endpoints -- verify runs against the resolved view, not the master. New migration (sibling targets JSON column). 17 new tests. Full suite green. Apple #18733. (sess-20260905-0720-ec33e7c5)
 
 - feat(community-tools): resume/CV builder + verifier, gated by a real per-account feature flag (IsCommunityToolsEnabled -> community-tools.access permission). Real JSON Resume schema-mirrored data model + itemized 2-layer verify (schema conformance + ATS-readiness rules). GET/PUT resume + POST verify, scoped to caller's own local_uid. Live-verified fresh-SQLite boot + migration. 12 new tests, full suite green. Apple #18725. (sess-20260905-0720-ec33e7c5)
