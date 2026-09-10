@@ -1,6 +1,7 @@
 # Changelog
 
 ## 2026-09-10
+- Community Tools: real auto-linking for email/profile links in PDF exports + markdown [text](url) links in the summary, both with real scheme-safety checks (no javascript:/data: links). Live-verified against real production data. Deployed live. Apple #18777. (sess-20260905-0720-ec33e7c5)
 
 - Community Tools: Compact PDF template header now puts name/label left, contact/links right (frees up vertical space, matching the two-column body). Deployed live. Apple #18773. (sess-20260905-0720-ec33e7c5)
 
