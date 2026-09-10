@@ -99,6 +99,14 @@ decompressing the real PDF's own FlateDecode content stream and confirming "Expe
 "Education" render at genuinely distinct x-coordinates. See
 `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4h for the full writeup.
 
+**Real, shipped (auto-linking + markdown links in the summary, header left/right layout)**:
+email and profile URLs render as real, clickable links in PDF exports (auto-adding `https://` to
+a bare domain), `basics.summary` supports a real, narrow `[text](url)` markdown subset via
+fpdf's own `Write`/`WriteLinkString`, and a shared `safeHref` rejects `javascript:`/`data:`/
+`vbscript:`/`file:` schemes outright. The Compact template's header also now puts name/label
+left and contact/links right, freeing vertical space. See
+`CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4h/§4j for the full writeup.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),
