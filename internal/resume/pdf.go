@@ -75,21 +75,11 @@ func RenderPDF(r *Resume, template string) ([]byte, error) {
 	})
 	pdf.AddPage()
 
-	pdf.SetFont("Arial", "B", 18)
-	pdf.CellFormat(0, 9, tr(name), "", 1, "C", false, 0, "")
-	if b.Label != "" {
-		pdf.SetFont("Arial", "I", 11)
-		pdf.CellFormat(0, 6, tr(b.Label), "", 1, "C", false, 0, "")
+	if template == "compact" {
+		renderCompactHeader(pdf, tr, r, name)
+	} else {
+		renderClassicHeader(pdf, tr, r, name)
 	}
-	if contact := joinNonEmpty("   |   ", b.Email, b.Phone); contact != "" {
-		pdf.SetFont("Arial", "", 10)
-		pdf.CellFormat(0, 6, tr(contact), "", 1, "C", false, 0, "")
-	}
-	if links := profileLinks(b.Profiles); links != "" {
-		pdf.SetFont("Arial", "", 9)
-		pdf.CellFormat(0, 6, tr(links), "", 1, "C", false, 0, "")
-	}
-	pdf.Ln(3)
 
 	if b.Summary != "" {
 		pdf.SetFont("Arial", "", 10)
@@ -137,6 +127,61 @@ func RenderPDF(r *Resume, template string) ([]byte, error) {
 // at the bottom of every page of every generated PDF, regardless of template.
 func footerLine(name string, exportedAt time.Time) string {
 	return name + "  ·  Exported " + exportedAt.Format("2006-01-02 15:04 MST")
+}
+
+// renderClassicHeader -- the original, centered-stack header: name, label, contact, and links
+// each on their own full-width, center-aligned line.
+func renderClassicHeader(pdf *fpdf.Fpdf, tr func(string) string, r *Resume, name string) {
+	b := r.Basics
+	pdf.SetFont("Arial", "B", 18)
+	pdf.CellFormat(0, 9, tr(name), "", 1, "C", false, 0, "")
+	if b.Label != "" {
+		pdf.SetFont("Arial", "I", 11)
+		pdf.CellFormat(0, 6, tr(b.Label), "", 1, "C", false, 0, "")
+	}
+	if contact := joinNonEmpty("   |   ", b.Email, b.Phone); contact != "" {
+		pdf.SetFont("Arial", "", 10)
+		pdf.CellFormat(0, 6, tr(contact), "", 1, "C", false, 0, "")
+	}
+	if links := profileLinks(b.Profiles); links != "" {
+		pdf.SetFont("Arial", "", 9)
+		pdf.CellFormat(0, 6, tr(links), "", 1, "C", false, 0, "")
+	}
+	pdf.Ln(3)
+}
+
+// renderCompactHeader -- founder real-time, 2026-09-10: "can we shift the contact info and links
+// to the right (right align) and the name and headline to the left so they can free up just a
+// bit more vertical space on the compact template?" Name+label sit LEFT, contact+links sit
+// RIGHT, sharing two rows instead of four separate centered lines -- a real, direct vertical-
+// space saving in the same spirit as the compact template's own two-column Experience/Education
+// layout. Row 1 (name/contact) always renders (name always has a real "Resume" fallback); row 2
+// (label/links) is skipped entirely when both are empty, rather than rendering a blank row.
+func renderCompactHeader(pdf *fpdf.Fpdf, tr func(string) string, r *Resume, name string) {
+	b := r.Basics
+	contact := joinNonEmpty("   |   ", b.Email, b.Phone)
+	links := profileLinks(b.Profiles)
+
+	left, _, right, _ := pdf.GetMargins()
+	pageW, _ := pdf.GetPageSize()
+	contentW := pageW - left - right
+	leftW := contentW * 0.6
+	rightW := contentW - leftW
+
+	pdf.SetX(left)
+	pdf.SetFont("Arial", "B", 18)
+	pdf.CellFormat(leftW, 9, tr(name), "", 0, "L", false, 0, "")
+	pdf.SetFont("Arial", "", 10)
+	pdf.CellFormat(rightW, 9, tr(contact), "", 2, "R", false, 0, "")
+
+	if b.Label != "" || links != "" {
+		pdf.SetX(left)
+		pdf.SetFont("Arial", "I", 11)
+		pdf.CellFormat(leftW, 6, tr(b.Label), "", 0, "L", false, 0, "")
+		pdf.SetFont("Arial", "", 9)
+		pdf.CellFormat(rightW, 6, tr(links), "", 2, "R", false, 0, "")
+	}
+	pdf.Ln(3)
 }
 
 // renderClassicExperienceEducation -- the original, single-column, ATS-safe layout: Experience

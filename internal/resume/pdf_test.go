@@ -2,6 +2,9 @@ package resume
 
 import (
 	"bytes"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,6 +191,70 @@ func TestFooterLine_IncludesNameAndTimestamp(t *testing.T) {
 	if got != want {
 		t.Fatalf("footerLine mismatch:\ngot:  %q\nwant: %q", got, want)
 	}
+}
+
+// TestRenderCompactHeader_NameLeftContactRight -- founder real-time, 2026-09-10: "can we shift
+// the contact info and links to the right (right align) and the name and headline to the left
+// so they can free up just a bit more vertical space on the compact template?" Real, direct
+// proof via the same SetCompression(false) + raw-content-stream technique already established
+// in this file: renders the compact header alone, then confirms the name's own Td x-coordinate
+// sits near the real left margin (56.7pt = 20mm) while the contact info's own Td x-coordinate
+// sits meaningfully further right -- not just that both strings appear somewhere on the page.
+func TestRenderCompactHeader_NameLeftContactRight(t *testing.T) {
+	r := &Resume{Basics: Basics{Name: "Jordan Rivera", Label: "Line Cook", Email: "jordan@example.com", Phone: "555-0100"}}
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.SetCompression(false)
+	pdf.SetMargins(20, 18, 20)
+	pdf.SetAutoPageBreak(true, 18)
+	tr := pdf.UnicodeTranslatorFromDescriptor("")
+	pdf.AddPage()
+	renderCompactHeader(pdf, tr, r, r.Basics.Name)
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		t.Fatalf("Output failed: %v", err)
+	}
+	content := buf.String()
+
+	nameIdx := strings.Index(content, "(Jordan Rivera)Tj")
+	contactIdx := strings.Index(content, "(jordan@example.com")
+	if nameIdx < 0 || contactIdx < 0 {
+		t.Fatalf("expected both the name and contact text to appear in the raw content stream, got:\n%s", content)
+	}
+	nameX := tdXBefore(t, content, nameIdx)
+	contactX := tdXBefore(t, content, contactIdx)
+	if nameX > 60 {
+		t.Fatalf("expected the name's own x-coordinate to sit near the real left margin (~56.7pt), got %.2f", nameX)
+	}
+	if contactX <= nameX+50 {
+		t.Fatalf("expected the contact info to render meaningfully to the RIGHT of the name (right-aligned in its own column), got name x=%.2f contact x=%.2f", nameX, contactX)
+	}
+
+	labelIdx := strings.Index(content, "(Line Cook)Tj")
+	if labelIdx < 0 {
+		t.Fatal("expected the label to appear in the raw content stream")
+	}
+	labelX := tdXBefore(t, content, labelIdx)
+	if labelX > 60 {
+		t.Fatalf("expected the label to also render near the left margin (same column as the name), got %.2f", labelX)
+	}
+}
+
+// tdXBefore finds the last real "<x> <y> Td" operator appearing before byteIdx in content and
+// returns its x value -- the real text-positioning operator fpdf emits immediately before the
+// Tj that actually draws the string at that position.
+func tdXBefore(t *testing.T, content string, byteIdx int) float64 {
+	t.Helper()
+	re := regexp.MustCompile(`([\d.]+) [\d.]+ Td`)
+	matches := re.FindAllStringSubmatchIndex(content[:byteIdx], -1)
+	if len(matches) == 0 {
+		t.Fatalf("no Td operator found before byte offset %d", byteIdx)
+	}
+	last := matches[len(matches)-1]
+	x, err := strconv.ParseFloat(content[last[2]:last[3]], 64)
+	if err != nil {
+		t.Fatalf("parse Td x value: %v", err)
+	}
+	return x
 }
 
 // TestRenderPDF_FooterAppearsOnARealUncompressedPage -- the same real
