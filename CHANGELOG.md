@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-09-10
+
+- Community Tools: Compact PDF template header now puts name/label left, contact/links right (frees up vertical space, matching the two-column body). Deployed live. Apple #18773. (sess-20260905-0720-ec33e7c5)
+
+
 ## 2026-09-09
 - Community Tools: Work/Education/Awards now auto-sort most-recent-first on every save (kanban CVB-12434) -- a new ongoing entry no longer gets buried at the bottom. Deployed live, real production data re-sorted. Apple #18769 (kanban completion). (sess-20260905-0720-ec33e7c5)
 - Community Tools: Compact 2-column PDF template (real, opt-in trade-off vs. ATS-safe classic) + a real candidate name/export timestamp in every PDF's footer and filename. Deployed live. Apple #18764. (sess-20260905-0720-ec33e7c5)
