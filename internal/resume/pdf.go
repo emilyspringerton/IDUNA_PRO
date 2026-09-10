@@ -9,6 +9,7 @@ package resume
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"time"
 
@@ -82,9 +83,11 @@ func RenderPDF(r *Resume, template string) ([]byte, error) {
 	}
 
 	if b.Summary != "" {
+		left, _, _, _ := pdf.GetMargins()
+		pdf.SetX(left)
 		pdf.SetFont("Arial", "", 10)
-		pdf.MultiCell(0, 5, tr(b.Summary), "", "L", false)
-		pdf.Ln(2)
+		writeMarkdownParagraph(pdf, tr, 5, b.Summary)
+		pdf.Ln(7)
 	}
 
 	if template == "compact" {
@@ -129,23 +132,124 @@ func footerLine(name string, exportedAt time.Time) string {
 	return name + "  ·  Exported " + exportedAt.Format("2006-01-02 15:04 MST")
 }
 
+// pdfSegment is one piece of a real, possibly-linked run of text -- e.g. one "Network: address"
+// profile entry, or the email address, rendered as its own real clickable link when url is set.
+type pdfSegment struct {
+	text string
+	url  string // "" = plain text, no link
+}
+
+// contactSegments builds the real, per-field segments for a Basics contact line -- founder
+// real-time, 2026-09-10: "can we add auto linking to the email." Email becomes a real mailto:
+// link; phone stays plain text (never asked to be linkified, and a bare phone number has no
+// single, unambiguous link scheme the way an email address does).
+func contactSegments(b Basics) []pdfSegment {
+	var segs []pdfSegment
+	if b.Email != "" {
+		segs = append(segs, pdfSegment{text: b.Email, url: "mailto:" + b.Email})
+	}
+	if b.Phone != "" {
+		segs = append(segs, pdfSegment{text: b.Phone})
+	}
+	return segs
+}
+
+// pdfProfileSegments builds one real segment per profile entry (see profileLinks' own doc
+// comment for the real "address = URL, falling back to username" convention this mirrors) --
+// founder real-time, 2026-09-10: "can we add auto linking to... the links on the exports."
+// Only a profile with a real URL gets a real, clickable link (via safeHref, which also adds a
+// missing https:// scheme to a bare "github.com/x/y"-style entry) -- a username-only entry has
+// no real URL to link to, so it renders as honest plain text rather than a guessed-at link.
+func pdfProfileSegments(profiles []Profile) []pdfSegment {
+	segs := make([]pdfSegment, 0, len(profiles))
+	for _, p := range profiles {
+		address := p.URL
+		if address == "" {
+			address = p.Username
+		}
+		if address == "" {
+			continue
+		}
+		label := joinNonEmpty(": ", p.Network, address)
+		if label == "" {
+			continue
+		}
+		seg := pdfSegment{text: label}
+		if p.URL != "" {
+			seg.url = safeHref(p.URL)
+		}
+		segs = append(segs, seg)
+	}
+	return segs
+}
+
+// pdfSegmentsWidth measures the real rendered width segments (joined by sep) would take using
+// the pdf's CURRENT font -- caller must SetFont first, matching whatever will actually be drawn.
+func pdfSegmentsWidth(pdf *fpdf.Fpdf, tr func(string) string, segments []pdfSegment, sep string) float64 {
+	total := 0.0
+	for i, s := range segments {
+		if i > 0 {
+			total += pdf.GetStringWidth(sep)
+		}
+		total += pdf.GetStringWidth(tr(s.text))
+	}
+	return total
+}
+
+// pdfDrawSegments draws segments left-to-right starting at the CURRENT cursor, each a real
+// clickable link (rendered in a real "this is a link" blue) when its own url is set, separated
+// by sep (always plain, never linked/colored). Leaves Y unchanged -- the caller advances it.
+func pdfDrawSegments(pdf *fpdf.Fpdf, tr func(string) string, segments []pdfSegment, sep string, h float64) {
+	for i, s := range segments {
+		if i > 0 {
+			pdf.CellFormat(pdf.GetStringWidth(sep), h, sep, "", 0, "L", false, 0, "")
+		}
+		text := tr(s.text)
+		w := pdf.GetStringWidth(text)
+		if s.url != "" {
+			pdf.SetTextColor(0, 0, 200)
+			pdf.CellFormat(w, h, text, "", 0, "L", false, 0, s.url)
+			pdf.SetTextColor(0, 0, 0)
+		} else {
+			pdf.CellFormat(w, h, text, "", 0, "L", false, 0, "")
+		}
+	}
+}
+
+const pdfSegmentSep = "   |   "
+
 // renderClassicHeader -- the original, centered-stack header: name, label, contact, and links
-// each on their own full-width, center-aligned line.
+// each on their own full-width, center-aligned line. Contact/links now render as real, per-
+// segment clickable links (email -> mailto:, each profile with a real URL -> that URL) instead
+// of inert text, centered as a WHOLE group (real width measured first, then the starting X
+// computed so the group sits centered) since CellFormat's own "C" align mode can't center a
+// sequence of independently-linked/colored segments the way a single plain string could.
 func renderClassicHeader(pdf *fpdf.Fpdf, tr func(string) string, r *Resume, name string) {
 	b := r.Basics
+	left, _, right, _ := pdf.GetMargins()
+	pageW, _ := pdf.GetPageSize()
+	contentW := pageW - left - right
+
 	pdf.SetFont("Arial", "B", 18)
 	pdf.CellFormat(0, 9, tr(name), "", 1, "C", false, 0, "")
 	if b.Label != "" {
 		pdf.SetFont("Arial", "I", 11)
 		pdf.CellFormat(0, 6, tr(b.Label), "", 1, "C", false, 0, "")
 	}
-	if contact := joinNonEmpty("   |   ", b.Email, b.Phone); contact != "" {
+
+	if segs := contactSegments(b); len(segs) > 0 {
 		pdf.SetFont("Arial", "", 10)
-		pdf.CellFormat(0, 6, tr(contact), "", 1, "C", false, 0, "")
+		w := pdfSegmentsWidth(pdf, tr, segs, pdfSegmentSep)
+		pdf.SetX(left + (contentW-w)/2)
+		pdfDrawSegments(pdf, tr, segs, pdfSegmentSep, 6)
+		pdf.Ln(6)
 	}
-	if links := profileLinks(b.Profiles); links != "" {
+	if segs := pdfProfileSegments(b.Profiles); len(segs) > 0 {
 		pdf.SetFont("Arial", "", 9)
-		pdf.CellFormat(0, 6, tr(links), "", 1, "C", false, 0, "")
+		w := pdfSegmentsWidth(pdf, tr, segs, pdfSegmentSep)
+		pdf.SetX(left + (contentW-w)/2)
+		pdfDrawSegments(pdf, tr, segs, pdfSegmentSep, 6)
+		pdf.Ln(6)
 	}
 	pdf.Ln(3)
 }
@@ -157,29 +261,39 @@ func renderClassicHeader(pdf *fpdf.Fpdf, tr func(string) string, r *Resume, name
 // space saving in the same spirit as the compact template's own two-column Experience/Education
 // layout. Row 1 (name/contact) always renders (name always has a real "Resume" fallback); row 2
 // (label/links) is skipped entirely when both are empty, rather than rendering a blank row.
+// Contact/links render as real, per-segment clickable links (see renderClassicHeader's own doc
+// comment) right-aligned as a whole group against the real right margin.
 func renderCompactHeader(pdf *fpdf.Fpdf, tr func(string) string, r *Resume, name string) {
 	b := r.Basics
-	contact := joinNonEmpty("   |   ", b.Email, b.Phone)
-	links := profileLinks(b.Profiles)
-
 	left, _, right, _ := pdf.GetMargins()
 	pageW, _ := pdf.GetPageSize()
 	contentW := pageW - left - right
 	leftW := contentW * 0.6
-	rightW := contentW - leftW
+	rightEdge := pageW - right
 
 	pdf.SetX(left)
 	pdf.SetFont("Arial", "B", 18)
 	pdf.CellFormat(leftW, 9, tr(name), "", 0, "L", false, 0, "")
 	pdf.SetFont("Arial", "", 10)
-	pdf.CellFormat(rightW, 9, tr(contact), "", 2, "R", false, 0, "")
+	if segs := contactSegments(b); len(segs) > 0 {
+		w := pdfSegmentsWidth(pdf, tr, segs, pdfSegmentSep)
+		pdf.SetXY(rightEdge-w, pdf.GetY())
+		pdfDrawSegments(pdf, tr, segs, pdfSegmentSep, 9)
+	}
+	pdf.Ln(9)
 
-	if b.Label != "" || links != "" {
+	linkSegs := pdfProfileSegments(b.Profiles)
+	if b.Label != "" || len(linkSegs) > 0 {
 		pdf.SetX(left)
 		pdf.SetFont("Arial", "I", 11)
 		pdf.CellFormat(leftW, 6, tr(b.Label), "", 0, "L", false, 0, "")
 		pdf.SetFont("Arial", "", 9)
-		pdf.CellFormat(rightW, 6, tr(links), "", 2, "R", false, 0, "")
+		if len(linkSegs) > 0 {
+			w := pdfSegmentsWidth(pdf, tr, linkSegs, pdfSegmentSep)
+			pdf.SetXY(rightEdge-w, pdf.GetY())
+			pdfDrawSegments(pdf, tr, linkSegs, pdfSegmentSep, 6)
+		}
+		pdf.Ln(6)
 	}
 	pdf.Ln(3)
 }
@@ -351,20 +465,77 @@ func joinNonEmpty(sep string, parts ...string) string {
 // than printing a bare, meaningless "GitHub:"), joined onto one line under the contact info.
 // Real, deliberate ordering choice: profiles render in the SAME order they appear in
 // b.Profiles, so a Target's own real, chosen selection order is respected, not resorted.
+// Built on pdfProfileSegments (2026-09-10, added for real per-segment PDF hyperlinks) so the
+// plain-text and clickable-link renderings share one real source of truth for which profiles
+// get included and how their label text is built, rather than two independent copies.
 func profileLinks(profiles []Profile) string {
-	parts := make([]string, 0, len(profiles))
-	for _, p := range profiles {
-		address := p.URL
-		if address == "" {
-			address = p.Username
-		}
-		if address == "" {
-			continue
-		}
-		label := joinNonEmpty(": ", p.Network, address)
-		if label != "" {
-			parts = append(parts, label)
-		}
+	segs := pdfProfileSegments(profiles)
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		parts[i] = s.text
 	}
 	return strings.Join(parts, "   |   ")
+}
+
+// safeHref -- founder real-time, 2026-09-10: "can we add auto linking to the email and the
+// links on the exports." Returns a normalized, safe URL to actually use as a real hyperlink
+// target, or "" if raw should NOT be turned into a clickable link at all -- a narrow, real
+// safety measure against dangerous schemes (javascript:, data:, vbscript:, file:) a user-
+// controlled field could otherwise smuggle into a real, clickable PDF link. A URL with no
+// recognized scheme at all (the common real case for a bare "github.com/x/y"-style profile
+// entry) gets a real https:// prefix added so it's actually clickable instead of silently
+// staying inert.
+func safeHref(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	lower := strings.ToLower(raw)
+	for _, dangerous := range []string{"javascript:", "data:", "vbscript:", "file:"} {
+		if strings.HasPrefix(lower, dangerous) {
+			return ""
+		}
+	}
+	for _, safe := range []string{"http://", "https://", "mailto:", "tel:"} {
+		if strings.HasPrefix(lower, safe) {
+			return raw
+		}
+	}
+	return "https://" + raw
+}
+
+// markdownLinkRe matches a real, narrow markdown-link subset: [text](url). No bold/italic/
+// headers/images -- a real, deliberate v0 boundary (founder asked specifically for "hyperlinks
+// there too," not a full markdown renderer), and no nested-bracket or escaped-paren support --
+// the common, real case a resume summary actually needs.
+var markdownLinkRe = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+
+// writeMarkdownParagraph -- founder real-time, 2026-09-10: "can we allow for markdown in the
+// summary so that we can have hyperlinks there too?" Uses fpdf's own Write/WriteLinkString --
+// deliberately NOT MultiCell -- because those are the real, documented fpdf primitives for
+// mixing plain and linked text within one real, word-wrapping paragraph flow (MultiCell has no
+// equivalent mixed-content mode; see Write's own doc comment: "current position is left just at
+// the end of the text," letting consecutive Write/WriteLinkString calls chain into one flowing
+// paragraph). A [text](url) whose url doesn't survive safeHref's own scheme check renders as
+// its own literal, un-linked markdown text -- never silently dropped.
+func writeMarkdownParagraph(pdf *fpdf.Fpdf, tr func(string) string, h float64, text string) {
+	lastEnd := 0
+	for _, m := range markdownLinkRe.FindAllStringSubmatchIndex(text, -1) {
+		if m[0] > lastEnd {
+			pdf.Write(h, tr(text[lastEnd:m[0]]))
+		}
+		linkText := text[m[2]:m[3]]
+		url := safeHref(text[m[4]:m[5]])
+		if url != "" {
+			pdf.SetTextColor(0, 0, 200)
+			pdf.WriteLinkString(h, tr(linkText), url)
+			pdf.SetTextColor(0, 0, 0)
+		} else {
+			pdf.Write(h, tr(text[m[0]:m[1]]))
+		}
+		lastEnd = m[1]
+	}
+	if lastEnd < len(text) {
+		pdf.Write(h, tr(text[lastEnd:]))
+	}
 }

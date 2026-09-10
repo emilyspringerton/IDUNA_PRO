@@ -290,3 +290,142 @@ func TestRenderPDF_FooterAppearsOnARealUncompressedPage(t *testing.T) {
 		t.Fatal("expected the real export date to appear in the raw, uncompressed page content")
 	}
 }
+
+// ---- Auto-linking + markdown links -- founder real-time, 2026-09-10: "can we add auto linking
+// to the email and the links on the exports also can we allow for markdown in the summary so
+// that we can have hyperlinks there too?" Real, direct proof via the actual public RenderPDF
+// output: fpdf stores a link annotation's own target as a real, PLAIN-TEXT "/URI (...)" entry in
+// the PDF's object structure (confirmed by generating and reading a real PDF directly) --
+// unlike page CONTENT, annotations are never stream-compressed, so these checks need no
+// SetCompression(false)/decompression step at all. ----
+
+func TestRenderPDF_EmailBecomesARealMailtoLink(t *testing.T) {
+	r := &Resume{Basics: Basics{Name: "Jordan Rivera", Email: "jordan@example.com"}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF error: %v", err)
+	}
+	if !bytes.Contains(out, []byte("/URI (mailto:jordan@example.com)")) {
+		t.Fatal("expected a real mailto: link annotation for the email address")
+	}
+}
+
+func TestRenderPDF_ProfileURLBecomesARealLink(t *testing.T) {
+	r := &Resume{Basics: Basics{
+		Name:     "Jordan Rivera",
+		Profiles: []Profile{{Network: "GitHub", URL: "github.com/jordan/parena"}},
+	}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF error: %v", err)
+	}
+	// safeHref adds a missing scheme -- a bare "github.com/..." profile entry must still become
+	// a REAL, clickable https:// link, not stay inert just because the user didn't type a scheme.
+	if !bytes.Contains(out, []byte("/URI (https://github.com/jordan/parena)")) {
+		t.Fatal("expected a real https:// link annotation, with the scheme auto-added, for the profile URL")
+	}
+}
+
+func TestRenderPDF_UsernameOnlyProfileDoesNotBecomeALink(t *testing.T) {
+	r := &Resume{Basics: Basics{
+		Name:     "Jordan Rivera",
+		Profiles: []Profile{{Network: "LinkedIn", Username: "jordanrivera"}},
+	}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF error: %v", err)
+	}
+	if bytes.Contains(out, []byte("/URI")) {
+		t.Fatal("expected NO link annotation for a username-only profile entry -- there's no real URL to link to, so it must render as honest plain text")
+	}
+	// The label text itself (e.g. "LinkedIn: jordanrivera") is inside the page's own compressed
+	// content stream under default compression, not independently checkable here without
+	// decompressing -- TestRenderPDF_RendersProfileLinks and
+	// TestProfileLinks_SkipsEntriesWithNeitherURLNorUsername already cover that the real text
+	// content is correct; this test's own real, distinct purpose is just confirming no link
+	// annotation gets created for a username-only entry.
+}
+
+func TestRenderPDF_DangerousSchemeIsNeverLinkified(t *testing.T) {
+	r := &Resume{Basics: Basics{
+		Name:     "Jordan Rivera",
+		Profiles: []Profile{{Network: "Evil", URL: "javascript:alert(1)"}},
+	}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF error: %v", err)
+	}
+	if bytes.Contains(out, []byte("/URI")) {
+		t.Fatal("expected a javascript: URL to never become a real clickable link annotation")
+	}
+}
+
+func TestRenderPDF_MarkdownLinkInSummaryBecomesARealLink(t *testing.T) {
+	r := &Resume{Basics: Basics{
+		Name:    "Jordan Rivera",
+		Summary: "Check out [my portfolio](https://example.com/portfolio) for more real work.",
+	}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF error: %v", err)
+	}
+	if !bytes.Contains(out, []byte("/URI (https://example.com/portfolio)")) {
+		t.Fatal("expected the markdown [text](url) link in the summary to become a real link annotation")
+	}
+}
+
+func TestRenderPDF_MarkdownLinkWithDangerousURLRendersAsPlainText(t *testing.T) {
+	r := &Resume{Basics: Basics{
+		Name:    "Jordan Rivera",
+		Summary: "Careful: [click me](javascript:alert(1)) is not a real link.",
+	}}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF must not error even on a dangerous-scheme markdown link, got: %v", err)
+	}
+	if bytes.Contains(out, []byte("/URI")) {
+		t.Fatal("expected a javascript:-scheme markdown link to never become a real link annotation")
+	}
+}
+
+func TestSafeHref(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"", ""},
+		{"https://example.com", "https://example.com"},
+		{"http://example.com", "http://example.com"},
+		{"github.com/x/y", "https://github.com/x/y"},
+		{"javascript:alert(1)", ""},
+		{"JAVASCRIPT:alert(1)", ""},
+		{"data:text/html,<script>", ""},
+		{"vbscript:msgbox(1)", ""},
+		{"  https://example.com  ", "https://example.com"},
+	}
+	for _, c := range cases {
+		got := safeHref(c.raw)
+		if got != c.want {
+			t.Errorf("safeHref(%q) = %q, want %q", c.raw, got, c.want)
+		}
+	}
+}
+
+func TestWriteMarkdownParagraph_PlainTextUnaffected(t *testing.T) {
+	// A summary with no markdown links at all must still render correctly (Write, not
+	// MultiCell, is now doing the work) -- a real regression check for the swap.
+	pdf := fpdf.New("P", "mm", "A4", "")
+	pdf.SetCompression(false)
+	pdf.SetMargins(20, 18, 20)
+	tr := pdf.UnicodeTranslatorFromDescriptor("")
+	pdf.AddPage()
+	pdf.SetFont("Arial", "", 10)
+	writeMarkdownParagraph(pdf, tr, 5, "A plain summary with no links at all.")
+	var buf bytes.Buffer
+	if err := pdf.Output(&buf); err != nil {
+		t.Fatalf("Output failed: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("A plain summary with no links at all.")) {
+		t.Fatal("expected the plain text to appear unchanged in the raw content stream")
+	}
+}
