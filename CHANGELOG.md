@@ -1,5 +1,8 @@
 # Changelog
 
+## 2026-09-10 (continued)
+- Community Tools: Skills section now groups by real category (Backend & APIs, Frontend, Cloud & Infrastructure, Security & Reliability, Databases, Leadership & Process, Other) instead of one flat, unordered list -- direct founder feedback: "Skills section is a dump, it's alphabetical chaos, employers scan, they don't read linearly." New `Skill.Category` field + `resume.GroupSkillsByCategory` (internal/resume/skill_categories.go), used by both `pdf.go`'s PDF export and console.html's screen preview so the two never drift apart. New `POST /resume/skills/categorize` -- real Vertex AI auto-categorization, reusing IDUNA's own GFD Item Builder credential/call pattern exactly (gcloud ADC, gemini-2.5-flash, responseMimeType JSON), idempotent by design (only ever touches skills with no category set). New console.html "Auto-organize with AI" button + a real Category dropdown on each skill row. OpenAPI spec (openapi/community_tools.json) updated with the new endpoint + field. `go build`/`go vet`/`go test ./...` all clean, new real unit + handler tests (grouping logic, response parsing, access gate, no-op idempotence, per-user scoping), fresh-SQLite live boot re-verified. Real, honest gap: the live Vertex network call itself wasn't exercised end to end in this sandbox (no active gcloud account here). See CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md §4k. (sess-20260905-0720-ec33e7c5)
+
 ## 2026-09-10
 - Community Tools: real auto-linking for email/profile links in PDF exports + markdown [text](url) links in the summary, both with real scheme-safety checks (no javascript:/data: links). Live-verified against real production data. Deployed live. Apple #18777. (sess-20260905-0720-ec33e7c5)
 

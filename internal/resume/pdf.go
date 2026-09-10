@@ -98,15 +98,28 @@ func RenderPDF(r *Resume, template string) ([]byte, error) {
 
 	if len(r.Skills) > 0 {
 		pdfSectionTitle(pdf, tr, "Skills")
-		names := make([]string, 0, len(r.Skills))
-		for _, s := range r.Skills {
-			if s.Name != "" {
-				names = append(names, s.Name)
+		// Real, founder-driven fix (2026-09-10): skills used to render as one flat,
+		// alphabetically-arbitrary comma list -- exactly the "employers scan, they don't read
+		// linearly" complaint named directly. Grouped by category (GroupSkillsByCategory,
+		// skill_categories.go) so a scanning reader sees "Backend & APIs: Go, Python..." as its
+		// own labeled line instead of one undifferentiated wall of words.
+		for _, g := range GroupSkillsByCategory(r.Skills) {
+			names := make([]string, 0, len(g.Skills))
+			for _, s := range g.Skills {
+				if s.Name != "" {
+					names = append(names, s.Name)
+				}
 			}
+			if len(names) == 0 {
+				continue
+			}
+			pdf.SetFont("Arial", "B", 9)
+			pdf.CellFormat(0, 5, tr(g.Category), "", 1, "L", false, 0, "")
+			pdf.SetFont("Arial", "", 10)
+			pdf.MultiCell(0, 5, tr(strings.Join(names, ", ")), "", "L", false)
+			pdf.Ln(1)
 		}
-		pdf.SetFont("Arial", "", 10)
-		pdf.MultiCell(0, 5, tr(strings.Join(names, ", ")), "", "L", false)
-		pdf.Ln(2)
+		pdf.Ln(1)
 	}
 
 	if len(r.Awards) > 0 {

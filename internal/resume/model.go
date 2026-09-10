@@ -158,6 +158,18 @@ type Skill struct {
 	Name     string   `json:"name,omitempty"`
 	Level    string   `json:"level,omitempty"`
 	Keywords []string `json:"keywords,omitempty"`
+	// Category -- real, founder-driven addition (2026-09-10): direct employer-scan feedback on
+	// the rendered resume ("Skills section is a dump -- it's alphabetical chaos. Employers scan,
+	// they don't read linearly"). A deliberate CarePyre extension beyond strict JSON Resume
+	// (jsonresume.org's own schema has no category field on a skill) — grouped-by-category
+	// scanning is what real employers actually want, matching the same "Backend & APIs / Frontend
+	// / Cloud & Infrastructure / Security & Reliability / Databases / Leadership & Process"
+	// buckets the founder named directly. Not a free-text field in practice: expected to hold one
+	// of resume.SkillCategories or SkillCategoryOther (skill_categories.go), either set manually
+	// or via the real Vertex AI auto-categorize endpoint
+	// (community_tools_skills_categorize.go) — but stored as a plain string, not an enum, so an
+	// older client that doesn't know about categories yet still round-trips the field untouched.
+	Category string `json:"category,omitempty"`
 }
 
 type Language struct {

@@ -498,6 +498,43 @@
         }
       }
     },
+    "/resume/skills/categorize": {
+      "post": {
+        "operationId": "categorizeSkills",
+        "summary": "Real Vertex AI auto-categorization of every skill with no Category set",
+        "description": "Sends every skill on the caller's own resume with an empty Category to Vertex AI (gemini-2.5-flash, real gcloud ADC auth, no static key) in a single batched call, buckets each into one of the six real categories (or Other), and saves the updated resume. A skill that already has a Category is never touched -- always safe to call again. Returns the caller's full, current skills list (unchanged if there was nothing to categorize).",
+        "requestBody": {
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "description": "The caller's current skills list, with any newly-assigned categories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Skill"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "502": {
+            "$ref": "#/components/responses/VertexError"
+          },
+          "503": {
+            "$ref": "#/components/responses/VertexUnavailable"
+          }
+        }
+      }
+    },
     "/resume/awards": {
       "post": {
         "operationId": "createAwardEntry",
@@ -1079,6 +1116,26 @@
             }
           }
         }
+      },
+      "VertexUnavailable": {
+        "description": "The real Vertex AI credential (gcloud ADC) is not available in this environment",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "VertexError": {
+        "description": "The real Vertex AI call failed or returned a response this endpoint couldn't parse",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     },
     "schemas": {
@@ -1263,6 +1320,11 @@
           },
           "name": {
             "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "description": "One of: Backend & APIs, Frontend, Cloud & Infrastructure, Security & Reliability, Databases, Leadership & Process, Other. Empty means uncategorized -- rendered identically to \"Other\". Set manually or via POST /resume/skills/categorize.",
+            "enum": ["Backend & APIs", "Frontend", "Cloud & Infrastructure", "Security & Reliability", "Databases", "Leadership & Process", "Other", ""]
           },
           "level": {
             "type": "string"

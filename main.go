@@ -394,6 +394,13 @@ func main() {
 	// UI, no PDF/preview rendering, and (until now) no stable per-entry id -- a real, silent gap
 	// closed here the same way Skills' own gap was closed earlier the same day.
 	communityToolsProfilesH := handlers.NewCommunityToolsProfilesHandler(db)
+	// CommunityToolsSkillsCategorizeHandler (2026-09-10) -- real Vertex AI auto-categorization,
+	// founder real-time direct employer-scan feedback: "Skills section is a dump -- it's
+	// alphabetical chaos... I think we need to build google vertex AI into it like we have for
+	// the DragonsNShit item builder so that vertex can auto organize the skills for us." Same
+	// real gcloud-ADC Vertex pattern IDUNA's own GFD Item Builder already established -- see
+	// community_tools_skills_categorize.go's own header comment.
+	communityToolsSkillsCategorizeH := &handlers.CommunityToolsSkillsCategorizeHandler{DB: db}
 	communityToolsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsH))
 	communityToolsVerifyProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsVerifyH))
 	communityToolsTargetsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsTargetsH))
@@ -404,6 +411,7 @@ func main() {
 	communityToolsSkillsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsSkillsH))
 	communityToolsAwardsProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsAwardsH))
 	communityToolsProfilesProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsProfilesH))
+	communityToolsSkillsCategorizeProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(communityToolsSkillsCategorizeH))
 	mux.Handle("/api/v1/community-tools/resume", communityToolsProtected)
 	mux.Handle("/api/v1/community-tools/resume/verify", communityToolsVerifyProtected)
 	mux.Handle("/api/v1/community-tools/resume/export.pdf", communityToolsExportProtected)
@@ -414,6 +422,10 @@ func main() {
 	mux.Handle("/api/v1/community-tools/resume/education/", communityToolsEducationProtected)
 	mux.Handle("/api/v1/community-tools/resume/skills", communityToolsSkillsProtected)
 	mux.Handle("/api/v1/community-tools/resume/skills/", communityToolsSkillsProtected)
+	// Registered as its own exact path -- net/http's ServeMux always prefers an exact-path match
+	// over the "/skills/" subtree pattern above, so POST .../skills/categorize reaches this
+	// handler rather than being swallowed by the generic per-ID entry handler.
+	mux.Handle("/api/v1/community-tools/resume/skills/categorize", communityToolsSkillsCategorizeProtected)
 	mux.Handle("/api/v1/community-tools/resume/awards", communityToolsAwardsProtected)
 	mux.Handle("/api/v1/community-tools/resume/awards/", communityToolsAwardsProtected)
 	mux.Handle("/api/v1/community-tools/resume/profiles", communityToolsProfilesProtected)

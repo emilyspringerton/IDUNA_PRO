@@ -2,6 +2,8 @@ package resume
 
 import (
 	"bytes"
+	"compress/zlib"
+	"io"
 	"regexp"
 	"strconv"
 	"strings"
@@ -10,6 +12,40 @@ import (
 
 	"github.com/go-pdf/fpdf"
 )
+
+// pdfDecompressedText -- inflates every real FlateDecode content stream in the PDF (fpdf
+// compresses by default) and returns their concatenation, so a test can assert real text
+// genuinely appears in the rendered output rather than just "RenderPDF didn't error."
+func pdfDecompressedText(t *testing.T, out []byte) string {
+	t.Helper()
+	var all bytes.Buffer
+	rest := out
+	for {
+		i := bytes.Index(rest, []byte("stream\r\n"))
+		streamMarkerLen := len("stream\r\n")
+		if i < 0 {
+			i = bytes.Index(rest, []byte("stream\n"))
+			streamMarkerLen = len("stream\n")
+		}
+		if i < 0 {
+			break
+		}
+		start := i + streamMarkerLen
+		end := bytes.Index(rest[start:], []byte("endstream"))
+		if end < 0 {
+			break
+		}
+		chunk := rest[start : start+end]
+		zr, err := zlib.NewReader(bytes.NewReader(chunk))
+		if err == nil {
+			decoded, _ := io.ReadAll(zr)
+			all.Write(decoded)
+			all.WriteByte('\n')
+		}
+		rest = rest[start+end:]
+	}
+	return all.String()
+}
 
 func TestRenderPDF_ProducesARealPDFFile(t *testing.T) {
 	r := &Resume{
@@ -49,6 +85,33 @@ func TestRenderPDF_EmptyResumeDoesNotError(t *testing.T) {
 	}
 	if !bytes.HasPrefix(out, []byte("%PDF-")) {
 		t.Fatal("expected a real, valid (if mostly blank) PDF even for an empty resume")
+	}
+}
+
+// TestRenderPDF_SkillsGroupedByCategory -- founder real-time, 2026-09-10, direct employer-scan
+// feedback: "Skills section is a dump -- it's alphabetical chaos." Before this, Skills rendered
+// as one flat comma-joined list with no category labels anywhere in the PDF. Decompresses the
+// real generated PDF content stream (FlateDecode, fpdf's own default) to prove the category
+// labels genuinely appear as real text in the output, not just that RenderPDF didn't error.
+func TestRenderPDF_SkillsGroupedByCategory(t *testing.T) {
+	r := &Resume{
+		Basics: Basics{Name: "Jordan Rivera"},
+		Skills: []Skill{
+			{Name: "Golang", Category: "Backend & APIs"},
+			{Name: "React", Category: "Frontend"},
+			{Name: "PostgreSQL", Category: "Databases"},
+			{Name: "Excel"}, // no category -> Other
+		},
+	}
+	out, err := RenderPDF(r, "classic")
+	if err != nil {
+		t.Fatalf("RenderPDF returned a real error: %v", err)
+	}
+	text := pdfDecompressedText(t, out)
+	for _, want := range []string{"Backend & APIs", "Frontend", "Databases", SkillCategoryOther, "Golang", "React", "PostgreSQL", "Excel"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("decompressed PDF content stream is missing %q -- category grouping isn't actually rendering", want)
+		}
 	}
 }
 

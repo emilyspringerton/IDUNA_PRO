@@ -107,6 +107,19 @@ fpdf's own `Write`/`WriteLinkString`, and a shared `safeHref` rejects `javascrip
 left and contact/links right, freeing vertical space. See
 `CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4h/§4j for the full writeup.
 
+**Real, shipped (Skills categorization + Vertex AI auto-organize, 2026-09-10)**: direct
+employer-scan feedback — "Skills section is a dump, it's alphabetical chaos" — closed with a new
+`Skill.Category` field, `resume.GroupSkillsByCategory` (one real, shared bucketing choke point
+both `pdf.go` and `console.html`'s screen preview use, kept in lockstep), and a real
+`POST /resume/skills/categorize` endpoint reusing IDUNA's own GFD Item Builder Vertex AI pattern
+exactly (gcloud ADC, `gemini-2.5-flash`, `responseMimeType: application/json`) to auto-bucket any
+uncategorized skill into one of six founder-named categories. Idempotent by design — only ever
+touches skills with an empty Category, never overwrites a manual choice. See
+`CarePyre/docs/COMMUNITY_TOOLS_RESUME_NORTHSTAR.md` §4k for the full writeup, including the
+honest note that the live Vertex network call itself wasn't exercised end to end in this sandbox
+(no active `gcloud` account here) — closed instead with real, network-free unit coverage of the
+response-parsing logic plus a live-reverified fresh-SQLite boot.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),
