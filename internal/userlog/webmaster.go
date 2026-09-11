@@ -29,7 +29,12 @@ func SeedWebmaster(ctx context.Context, credPath string, log EventLog, proj User
 		return fmt.Errorf("webmaster seed replay: %w", err)
 	}
 
-	existing, err := proj.GetByUID(ctx, 0)
+	// tenantID hardcoded to 1 (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): this runs at
+	// boot, before any request/JWT exists to pull a real tenant claim from -- webmaster (uid=0)
+	// is this instance's own bootstrap account, so it belongs to this instance's own real,
+	// current tenant (1) the same as every other pre-Phase-1 row does.
+	const bootTenantID = 1
+	existing, err := proj.GetByUID(ctx, bootTenantID, 0)
 	if err != nil {
 		return fmt.Errorf("webmaster check uid=0: %w", err)
 	}
@@ -66,6 +71,7 @@ func SeedWebmaster(ctx context.Context, credPath string, log EventLog, proj User
 		Email:        creds.Email,
 		DisplayName:  creds.DisplayName,
 		PasswordHash: string(hash),
+		TenantID:     bootTenantID,
 	})
 	ev := Event{
 		ID:          uuid.New().String(),

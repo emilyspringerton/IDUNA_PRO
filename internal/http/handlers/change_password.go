@@ -56,7 +56,7 @@ func (h *ChangePasswordHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	user, err := h.Proj.GetByUID(r.Context(), *uid)
+	user, err := h.Proj.GetByUID(r.Context(), callerTenantID(r), *uid)
 	if err != nil || user == nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

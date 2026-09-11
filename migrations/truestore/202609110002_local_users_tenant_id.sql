@@ -1,0 +1,15 @@
+-- Phase 1 of real, row-level multi-tenancy (docs/MULTI_TENANCY_NORTHSTAR.md), continued from
+-- 202609110001_tenants.sql. Real, deliberate contrast with 202609070007_local_users_org_id.sql's
+-- own `DEFAULT 0` (which means "no organization assigned," a real, safe, backward-compatible
+-- sentinel for a WITHIN-tenant concept): every existing row in this table today genuinely IS
+-- tenant 1's data (this instance's only real tenant so far, seeded by the previous migration) --
+-- DEFAULT 1 here is a real fact about existing rows, not an "unassigned" placeholder.
+--
+-- Real, deliberately deferred for this phase: per-tenant email uniqueness. The existing
+-- `UNIQUE KEY uniq_local_user_email` on this table stays global -- two different tenants still
+-- cannot register the same email address. Most real multi-tenant SaaS platforms want per-tenant
+-- uniqueness instead; changing a unique constraint is a heavier migration than proving out the
+-- core isolation mechanism needs, and this phase only ever creates real accounts under tenant 1
+-- anyway (no self-serve tenant picker exists yet) -- named here as a real, concrete Phase 2
+-- decision, not silently ignored.
+ALTER TABLE local_users ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1;

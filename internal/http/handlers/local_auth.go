@@ -54,7 +54,12 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.Proj.GetByEmail(r.Context(), req.Email)
+	// tenantID hardcoded to 1 (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): login itself has
+	// no caller-tenant yet to scope by -- there's no tenant-selection UI at sign-in, and this
+	// phase only has one real tenant anyway. Real, temporary, matching register.go's own
+	// identical deferred decision.
+	const loginTenantID = 1
+	user, err := h.Proj.GetByEmail(r.Context(), loginTenantID, req.Email)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -99,9 +104,14 @@ func (h *LocalAuthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// request" convention local_uid/permissions already establish) so handlers never need a
 		// DB round-trip just to know the caller's own organization for cluster-scoping checks.
 		"org_id": user.OrgID,
-		"iss":    issuer,
-		"aud":    "farthq-ecosystem",
-		"exp":    exp.Unix(),
+		// tenant_id -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11): the real cross-customer
+		// isolation claim (distinct from org_id's own WITHIN-tenant scope, see
+		// userlog.LocalUser.TenantID's own doc comment). Every handler that reads/writes
+		// local_users now scopes by this via callerTenantID(r).
+		"tenant_id": user.TenantID,
+		"iss":       issuer,
+		"aud":       "farthq-ecosystem",
+		"exp":       exp.Unix(),
 	}
 	token, err := authjwt.Sign(h.Keys, claims)
 	if err != nil {

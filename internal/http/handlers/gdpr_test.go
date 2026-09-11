@@ -42,6 +42,7 @@ func newTestGDPRHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sql.DB) {
 			is_provider_admin INTEGER NOT NULL DEFAULT 0,
 			is_community_tools_enabled INTEGER NOT NULL DEFAULT 0,
 			org_id INTEGER NOT NULL DEFAULT 0,
+			tenant_id INTEGER NOT NULL DEFAULT 1,
 			created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE (email)
@@ -77,7 +78,7 @@ func newTestGDPRHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sql.DB) {
 	rec, err := log.Append(context.Background(), userlog.Event{
 		ID:   "e1",
 		Type: userlog.EventUserCreated,
-		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 1, Email: "self@example.com"}),
+		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 1, Email: "self@example.com", TenantID: 1}),
 	})
 	if err != nil {
 		t.Fatalf("seed uid1: %v", err)
@@ -86,7 +87,7 @@ func newTestGDPRHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sql.DB) {
 	rec2, err := log.Append(context.Background(), userlog.Event{
 		ID:   "e2",
 		Type: userlog.EventUserCreated,
-		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 2, Email: "other@example.com"}),
+		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 2, Email: "other@example.com", TenantID: 1}),
 	})
 	if err != nil {
 		t.Fatalf("seed uid2: %v", err)
@@ -256,5 +257,52 @@ func TestGDPRHandler_DownloadRequiresRequesterOrAdmin(t *testing.T) {
 	h.ServeHTTP(rrOK, allowed)
 	if rrOK.Code != http.StatusOK {
 		t.Fatalf("expected 200 for owner download, got %d: %s", rrOK.Code, rrOK.Body.String())
+	}
+}
+
+// TestGDPRHandler_AdminCannotActOnCrossTenantUser -- the real, found-live gap fix
+// (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): before this, a users.admin holder could
+// export or delete ANY local_uid given in the request body, with no tenant check anywhere in the
+// chain. A tenant-1 admin (no tenant_id claim on this test's own token -> callerTenantID's real
+// "default to 1" fallback) must not be able to touch uid 3, seeded under tenant 2.
+func TestGDPRHandler_AdminCannotActOnCrossTenantUser(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	h, db := newTestGDPRHandler(t, keys)
+
+	log, err := userlog.NewFileEventLog(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileEventLog: %v", err)
+	}
+	t.Cleanup(func() { log.Close() })
+	proj := userlog.NewSQLiteProjector(db)
+	rec, err := log.Append(context.Background(), userlog.Event{
+		ID:   "e3",
+		Type: userlog.EventUserCreated,
+		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 3, Email: "tenant2@example.com", TenantID: 2}),
+	})
+	if err != nil {
+		t.Fatalf("seed uid3 (tenant 2): %v", err)
+	}
+	if err := proj.Apply(context.Background(), rec[0]); err != nil {
+		t.Fatalf("apply uid3 seed: %v", err)
+	}
+
+	token := gdprToken(t, keys, 1, "users.admin") // tenant 1 (default, no explicit claim)
+
+	body, _ := json.Marshal(map[string]int{"local_uid": 3})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/gdpr/delete", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 deleting a cross-tenant user via GDPR delete, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var email string
+	if err := db.QueryRow(`SELECT email FROM local_users WHERE local_uid = 3`).Scan(&email); err != nil {
+		t.Fatalf("query raw row: %v", err)
+	}
+	if email != "tenant2@example.com" {
+		t.Fatalf("expected the cross-tenant user's real email to survive untouched, got %q", email)
 	}
 }

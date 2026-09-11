@@ -37,7 +37,7 @@ func (p *fakeUserProjector) Apply(_ context.Context, rec userlog.Record) error {
 		}
 		p.byUID[d.LocalUID] = &userlog.LocalUser{
 			LocalUID: d.LocalUID, Email: d.Email, DisplayName: d.DisplayName,
-			PasswordHash: d.PasswordHash, Status: "active",
+			PasswordHash: d.PasswordHash, Status: "active", TenantID: d.TenantID,
 		}
 	case userlog.EventUserStatusChanged:
 		var d userlog.UserStatusChangedData
@@ -92,21 +92,32 @@ func (p *fakeUserProjector) Apply(_ context.Context, rec userlog.Record) error {
 }
 func (p *fakeUserProjector) Cursor(context.Context) (uint64, error)      { return 0, nil }
 func (p *fakeUserProjector) AdvanceCursor(context.Context, uint64) error { return nil }
-func (p *fakeUserProjector) GetByUID(_ context.Context, uid int) (*userlog.LocalUser, error) {
-	return p.byUID[uid], nil
+
+// GetByUID/GetByEmail/ListUsers/ScrubPII all genuinely filter by tenantID (MULTI_TENANCY_
+// NORTHSTAR.md Phase 1) -- unlike stubUserProjector (local_auth_test.go), this fake backs the
+// real adversarial cross-tenant test below, so it has to behave like the real projector, not just
+// satisfy the interface.
+func (p *fakeUserProjector) GetByUID(_ context.Context, tenantID, uid int) (*userlog.LocalUser, error) {
+	u := p.byUID[uid]
+	if u == nil || u.TenantID != tenantID {
+		return nil, nil
+	}
+	return u, nil
 }
-func (p *fakeUserProjector) GetByEmail(_ context.Context, email string) (*userlog.LocalUser, error) {
+func (p *fakeUserProjector) GetByEmail(_ context.Context, tenantID int, email string) (*userlog.LocalUser, error) {
 	for _, u := range p.byUID {
-		if u.Email == email {
+		if u.Email == email && u.TenantID == tenantID {
 			return u, nil
 		}
 	}
 	return nil, nil
 }
-func (p *fakeUserProjector) ListUsers(context.Context, int) ([]userlog.LocalUser, error) {
+func (p *fakeUserProjector) ListUsers(_ context.Context, tenantID, _ int) ([]userlog.LocalUser, error) {
 	out := make([]userlog.LocalUser, 0, len(p.byUID))
 	for _, u := range p.byUID {
-		out = append(out, *u)
+		if u.TenantID == tenantID {
+			out = append(out, *u)
+		}
 	}
 	return out, nil
 }
@@ -114,7 +125,14 @@ func (p *fakeUserProjector) NextUID(context.Context) (int, error) {
 	p.next++
 	return p.next, nil
 }
-func (p *fakeUserProjector) ScrubPII(context.Context, int) error { return nil }
+func (p *fakeUserProjector) ScrubPII(_ context.Context, tenantID, uid int) error {
+	u := p.byUID[uid]
+	if u == nil || u.TenantID != tenantID {
+		return nil
+	}
+	u.Email, u.DisplayName, u.PasswordHash = "[redacted]", "[redacted]", "[redacted]"
+	return nil
+}
 
 // CP-HIPAA-1: a provider (mail-accounts.provision) can now create a participant's local user
 // record -- the real, necessary first half of "providers can create email accounts for
@@ -213,8 +231,8 @@ func itoaTest(n int) string {
 func TestUsersHandler_OperatorAdminCannotSuspendAnotherOperatorAdmin(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		2: {LocalUID: 2, Email: "op1@example.com", Status: "active", IsOperatorAdmin: true},
-		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true},
+		2: {LocalUID: 2, Email: "op1@example.com", Status: "active", IsOperatorAdmin: true, TenantID: 1},
+		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true, TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	// Caller is uid 2, an Operator Admin (users.admin, no admins.manage).
@@ -229,7 +247,7 @@ func TestUsersHandler_OperatorAdminCannotSuspendAnotherOperatorAdmin(t *testing.
 func TestUsersHandler_TopAdminCanSuspendAnOperatorAdmin(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true},
+		3: {LocalUID: 3, Email: "op2@example.com", Status: "active", IsOperatorAdmin: true, TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	// Caller holds admins.manage -- the real Top Admin marker.
@@ -249,7 +267,7 @@ func TestUsersHandler_TopAdminCanSuspendAnOperatorAdmin(t *testing.T) {
 func TestUsersHandler_CommunityToolsFlagRoundTripsThroughListUsers(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active", TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	token := mailAccountsToken(t, keys, 1, "users.admin")
@@ -288,7 +306,7 @@ func TestUsersHandler_CommunityToolsFlagRoundTripsThroughListUsers(t *testing.T)
 func TestUsersHandler_NonAdminCannotSetCommunityToolsFlag(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active", TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	// mail-accounts.provision only -- a Provider Operator, real but insufficient tier.
@@ -303,7 +321,7 @@ func TestUsersHandler_NonAdminCannotSetCommunityToolsFlag(t *testing.T) {
 func TestUsersHandler_OperatorAdminCannotGrantAdminTierRoles(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		5: {LocalUID: 5, Email: "regular@example.com", Status: "active"},
+		5: {LocalUID: 5, Email: "regular@example.com", Status: "active", TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	token := mailAccountsToken(t, keys, 2, "users.admin") // Operator Admin, no admins.manage
@@ -317,7 +335,7 @@ func TestUsersHandler_OperatorAdminCannotGrantAdminTierRoles(t *testing.T) {
 func TestUsersHandler_ProviderAdminCanOnlyToggleProviderRole(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		7: {LocalUID: 7, Email: "participant@example.com", Status: "active"},
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", TenantID: 1},
 	}
 	h := newTierTestHandler(t, keys, seed)
 	token := mailAccountsToken(t, keys, 6, "providers.manage") // Provider Admin, no users.admin
@@ -404,7 +422,7 @@ func TestUsersHandler_ProviderCanResetPasswordForParticipantInSameCluster(t *tes
 	keys, _ := jwt.GenerateKeys()
 	// uid 7: a participant onboarded by org 1 (a health care provider).
 	seed := map[int]*userlog.LocalUser{
-		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1, TenantID: 1},
 	}
 	h, db := newClusterTestHandler(t, keys, seed)
 	if _, err := db.Exec(`INSERT INTO organizations (id, name, cluster_id) VALUES (1, 'Health Clinic', 100), (2, 'Downtown Shelter', 100)`); err != nil {
@@ -431,7 +449,7 @@ func TestUsersHandler_ProviderCanResetPasswordForParticipantInSameCluster(t *tes
 func TestUsersHandler_ProviderCannotResetPasswordOutsideCluster(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1, TenantID: 1},
 	}
 	h, db := newClusterTestHandler(t, keys, seed)
 	// org 1 and org 3 do NOT share a cluster (org 3 has no cluster_id at all).
@@ -457,7 +475,7 @@ func TestUsersHandler_ProviderCannotResetPasswordOutsideCluster(t *testing.T) {
 func TestUsersHandler_SameOrgPasswordResetIsNotLoggedAsCrossOrg(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	seed := map[int]*userlog.LocalUser{
-		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1},
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 1, TenantID: 1},
 	}
 	h, db := newClusterTestHandler(t, keys, seed)
 	if _, err := db.Exec(`INSERT INTO organizations (id, name) VALUES (1, 'Health Clinic')`); err != nil {
@@ -484,7 +502,7 @@ func TestUsersHandler_UnassignedOrgNeverSharesCluster(t *testing.T) {
 	keys, _ := jwt.GenerateKeys()
 	// Participant has no org assigned at all (org_id 0, the pre-CP-HIPAA-3 default).
 	seed := map[int]*userlog.LocalUser{
-		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 0},
+		7: {LocalUID: 7, Email: "participant@example.com", Status: "active", OrgID: 0, TenantID: 1},
 	}
 	h, _ := newClusterTestHandler(t, keys, seed)
 
@@ -494,5 +512,84 @@ func TestUsersHandler_UnassignedOrgNeverSharesCluster(t *testing.T) {
 	rr := patchUser(t, h, token, 7, map[string]any{"password": "a-real-new-password"})
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 -- two unassigned (org_id 0) accounts must never be treated as sharing a cluster, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11) -- the real Definition of Done: two tenants'
+// local_users rows in the SAME database/handler, a real adversarial test confirming a tenant-A
+// JWT genuinely cannot read a tenant-B user via GET /api/v1/users/{uid}, the one real GET-by-uid
+// route with both an admin-permission branch AND a self-access carve-out (users.go's own getUser)
+// -- the shape most likely to have one branch scoped and the other forgotten.
+
+func tenantToken(t *testing.T, keys *jwt.Keys, localUID, tenantID int, perms ...string) string {
+	t.Helper()
+	claims := map[string]any{
+		"sub":       "local:" + strconv.Itoa(localUID),
+		"local_uid": localUID,
+		"tenant_id": tenantID,
+		"exp":       time.Now().Add(time.Hour).Unix(),
+	}
+	if len(perms) > 0 {
+		claims["permissions"] = perms
+	}
+	tok, err := jwt.Sign(keys, claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return tok
+}
+
+func TestUsersHandler_AdminCannotGetCrossTenantUser(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		1: {LocalUID: 1, Email: "admin@tenant1.example.com", Status: "active", TenantID: 1},
+		2: {LocalUID: 2, Email: "user@tenant2.example.com", Status: "active", TenantID: 2},
+	}
+	h := newTierTestHandler(t, keys, seed)
+
+	// A real tenant-1 admin, explicit tenant_id claim.
+	token := tenantToken(t, keys, 1, 1, "users.admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/2", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (not 403 -- cross-tenant must look identical to nonexistent) reading a cross-tenant user, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	// Real regression guard: the SAME admin reading their own tenant's user must still work.
+	sameReq := httptest.NewRequest(http.MethodGet, "/api/v1/users/1", nil)
+	sameReq.Header.Set("Authorization", "Bearer "+token)
+	sameRR := httptest.NewRecorder()
+	h.ServeHTTP(sameRR, sameReq)
+	if sameRR.Code != http.StatusOK {
+		t.Fatalf("expected 200 reading a same-tenant user, got %d: %s", sameRR.Code, sameRR.Body.String())
+	}
+}
+
+// TestUsersHandler_MissingTenantClaimDefaultsToTenantOne -- a real trip-wire, not just a
+// regression test: callerTenantID's own doc comment names this exact fallback (agent/cookie
+// tokens carry no tenant_id claim yet, see that function) as temporary and Phase-4-removable. If
+// a future change alters the default (e.g. to 0, or a hard failure) without updating this test,
+// this fails loudly instead of silently drifting -- the same real discipline this whole phase's
+// own "explicit, compiler-enforced, never silently-wrong" design argues for elsewhere.
+func TestUsersHandler_MissingTenantClaimDefaultsToTenantOne(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	seed := map[int]*userlog.LocalUser{
+		1: {LocalUID: 1, Email: "tenant1@example.com", Status: "active", TenantID: 1},
+	}
+	h := newTierTestHandler(t, keys, seed)
+
+	// mailAccountsToken carries no tenant_id claim at all -- matches a real agent-issued token
+	// today (admin_login.go, AgentAuthHandler), which don't mint one yet.
+	token := mailAccountsToken(t, keys, 1, "users.admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/1", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected a claims-less-tenant token to see tenant-1 data (the documented, temporary Phase 1 fallback), got %d: %s", rr.Code, rr.Body.String())
 	}
 }

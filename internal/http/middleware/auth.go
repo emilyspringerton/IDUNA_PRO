@@ -237,6 +237,30 @@ func SubjectFromContext(ctx context.Context) string {
 	return sub
 }
 
+// TenantIDFromContext returns the "tenant_id" claim from the JWT stored in context, and whether
+// it was present at all. Real, deliberate two-value return (unlike SubjectFromContext's bare
+// string) -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11) only mints this claim from
+// local_auth.go/register.go; an agent- or cookie-issued token (admin_login.go, AgentAuthHandler,
+// GoogleAuthHandler) has no tenant_id at all today, and a caller needs to distinguish "claims
+// tenant 0" from "claims no tenant" to apply its own real, temporary single-tenant fallback
+// (see internal/http/handlers/users.go's own callerTenantID) rather than silently misreading an
+// absent claim as tenant 0. JSON-unmarshaled numbers decode as float64, same handling
+// PermissionsFromContext/callerLocalUID already establish for other numeric claims.
+func TenantIDFromContext(ctx context.Context) (int, bool) {
+	claims := ClaimsFromContext(ctx)
+	if claims == nil {
+		return 0, false
+	}
+	switch v := claims["tenant_id"].(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	default:
+		return 0, false
+	}
+}
+
 func hasPermission(claims map[string]any, perm string) bool {
 	if claims == nil {
 		return false

@@ -26,17 +26,24 @@ type stubUserProjector struct {
 func (s *stubUserProjector) Apply(context.Context, userlog.Record) error { return nil }
 func (s *stubUserProjector) Cursor(context.Context) (uint64, error)      { return 0, nil }
 func (s *stubUserProjector) AdvanceCursor(context.Context, uint64) error { return nil }
-func (s *stubUserProjector) GetByUID(_ context.Context, uid int) (*userlog.LocalUser, error) {
+
+// GetByUID/GetByEmail/ListUsers/ScrubPII deliberately ignore the new tenantID parameter
+// (MULTI_TENANCY_NORTHSTAR.md Phase 1) -- this stub backs the login/me/change-password tests,
+// none of which exercise multi-tenant behavior; callerTenantID(r)'s own real "default to 1 when
+// absent" fallback means every test token here resolves to tenant 1 regardless, so a real,
+// tenant-filtering fake isn't needed here (see fakeUserProjector in users_test.go for the one
+// that IS tenant-aware, backing the real adversarial cross-tenant test).
+func (s *stubUserProjector) GetByUID(_ context.Context, _ int, uid int) (*userlog.LocalUser, error) {
 	return s.byUID[uid], nil
 }
-func (s *stubUserProjector) GetByEmail(_ context.Context, email string) (*userlog.LocalUser, error) {
+func (s *stubUserProjector) GetByEmail(_ context.Context, _ int, email string) (*userlog.LocalUser, error) {
 	return s.byEmail[email], nil
 }
-func (s *stubUserProjector) ListUsers(context.Context, int) ([]userlog.LocalUser, error) {
+func (s *stubUserProjector) ListUsers(context.Context, int, int) ([]userlog.LocalUser, error) {
 	return nil, nil
 }
-func (s *stubUserProjector) NextUID(context.Context) (int, error) { return 1, nil }
-func (s *stubUserProjector) ScrubPII(context.Context, int) error  { return nil }
+func (s *stubUserProjector) NextUID(context.Context) (int, error)     { return 1, nil }
+func (s *stubUserProjector) ScrubPII(context.Context, int, int) error { return nil }
 
 func mustHash(t *testing.T, password string) string {
 	t.Helper()

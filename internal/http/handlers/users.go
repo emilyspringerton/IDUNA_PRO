@@ -122,7 +122,8 @@ func (h *UsersHandler) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existing, err := h.Proj.GetByEmail(r.Context(), req.Email)
+	tenantID := callerTenantID(r)
+	existing, err := h.Proj.GetByEmail(r.Context(), tenantID, req.Email)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -150,12 +151,16 @@ func (h *UsersHandler) createUser(w http.ResponseWriter, r *http.Request) {
 	// picks an organization by hand, it's inherited from whoever's actually onboarding this
 	// person. A caller with no org_id (0, the default) produces a participant with no org_id
 	// either -- correctly opts them out of any cluster-wide access until an admin assigns one.
+	// TenantID (MULTI_TENANCY_NORTHSTAR.md Phase 1) is stamped the same real way, from
+	// callerTenantID(r) -- an admin creates users within their OWN tenant, same precedent
+	// owning_org_id already set for mail_accounts.go/sip_accounts.go.
 	payload, _ := json.Marshal(userlog.UserCreatedData{
 		LocalUID:     nextUID,
 		Email:        req.Email,
 		DisplayName:  req.DisplayName,
 		PasswordHash: string(hash),
 		OrgID:        callerOrgID(r),
+		TenantID:     tenantID,
 	})
 	ev := userlog.Event{
 		ID:          uuid.New().String(),
@@ -176,7 +181,7 @@ func (h *UsersHandler) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = h.Proj.AdvanceCursor(r.Context(), records[0].Sequence)
 
-	user, _ := h.Proj.GetByUID(r.Context(), nextUID)
+	user, _ := h.Proj.GetByUID(r.Context(), tenantID, nextUID)
 	writeJSON(w, http.StatusCreated, userToJSON(user))
 }
 
@@ -189,7 +194,7 @@ func (h *UsersHandler) listUsers(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	users, err := h.Proj.ListUsers(r.Context(), limit)
+	users, err := h.Proj.ListUsers(r.Context(), callerTenantID(r), limit)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -212,7 +217,7 @@ func (h *UsersHandler) getUser(w http.ResponseWriter, r *http.Request, uid int) 
 			return
 		}
 	}
-	user, err := h.Proj.GetByUID(r.Context(), uid)
+	user, err := h.Proj.GetByUID(r.Context(), callerTenantID(r), uid)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -265,7 +270,8 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		return
 	}
 
-	existing, err := h.Proj.GetByUID(r.Context(), uid)
+	tenantID := callerTenantID(r)
+	existing, err := h.Proj.GetByUID(r.Context(), tenantID, uid)
 	if err != nil || existing == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
@@ -594,7 +600,7 @@ func (h *UsersHandler) updateUser(w http.ResponseWriter, r *http.Request, uid in
 		_ = h.Proj.AdvanceCursor(ctx, recs[0].Sequence)
 	}
 
-	updated, _ := h.Proj.GetByUID(ctx, uid)
+	updated, _ := h.Proj.GetByUID(ctx, tenantID, uid)
 	if updated == nil {
 		updated = existing
 	}
@@ -608,7 +614,7 @@ func (h *UsersHandler) deleteUser(w http.ResponseWriter, r *http.Request, uid in
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "cannot delete webmaster (uid=0)"})
 		return
 	}
-	existing, err := h.Proj.GetByUID(r.Context(), uid)
+	existing, err := h.Proj.GetByUID(r.Context(), callerTenantID(r), uid)
 	if err != nil || existing == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
@@ -660,8 +666,8 @@ func userToJSON(u *userlog.LocalUser) map[string]any {
 		// via PATCH but never actually returned here, so the admin console had no way to show
 		// current state (a checkbox built against this would always render unchecked).
 		"is_community_tools_enabled": u.IsCommunityToolsEnabled,
-		"created_at":        u.CreatedAt.Format(time.RFC3339),
-		"updated_at":        u.UpdatedAt.Format(time.RFC3339),
+		"created_at":                 u.CreatedAt.Format(time.RFC3339),
+		"updated_at":                 u.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -741,6 +747,29 @@ func callerOrgID(r *http.Request) int {
 		}
 	}
 	return 0
+}
+
+// callerTenantID -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11, founder real-time: "idunapro
+// needs to become truely multi tenant currently its just a fork of iduna for carepyre"). Mirrors
+// callerOrgID's own exact shape, reading the "tenant_id" claim baked in at login (see
+// local_auth.go's own claims map) via middleware.TenantIDFromContext.
+//
+// Real, deliberate difference from callerOrgID's "0 is a safe, permanent default": when the
+// claim is ABSENT (not just zero), this defaults to tenant 1, not 0 or a hard failure. This is
+// only correct because tenant 1 is the only real tenant that exists in this phase -- an absent
+// claim can never leak into a tenant that doesn't yet exist to leak into. This fallback exists
+// because Google-OAuth and M2M agent tokens (auth.go, admin_login.go) don't carry a tenant_id
+// claim yet (neither the separate Google-identity `users` table nor `agents` gets a tenant_id
+// column in this phase) -- without it, Back Office's own currently-working agent-backed admin
+// session would regress to seeing zero local_users the moment this phase ships. Real, temporary:
+// delete this fallback once agent/cookie tokens carry a real tenant_id claim of their own (see
+// MULTI_TENANCY_NORTHSTAR.md Phase 4) -- TestUsersHandler_MissingTenantClaimDefaultsToTenantOne
+// pins this exact behavior so a future change to it fails loudly instead of drifting silently.
+func callerTenantID(r *http.Request) int {
+	if tenantID, ok := middleware.TenantIDFromContext(r.Context()); ok {
+		return tenantID
+	}
+	return 1
 }
 
 // orgsShareCluster -- CP-HIPAA-3 (founder real-time: "there may be a several organizations who

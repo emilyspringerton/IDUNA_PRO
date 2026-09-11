@@ -74,8 +74,17 @@ func (h *RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// tenantID hardcoded to 1 (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): open
+	// self-registration has no tenant-selection UI yet (that's the real, later
+	// console.okemily.com self-serve signup flow, Phase 5) -- every new self-registered account
+	// in this phase explicitly belongs to tenant 1, this instance's own only real tenant, not
+	// left to silently default. Real, deliberately named consequence of email uniqueness staying
+	// a GLOBAL constraint for this phase (202609110002 migration's own doc comment): this
+	// duplicate-email check only ever needs to consider tenant 1 today.
+	const registerTenantID = 1
+
 	// Reject duplicate emails.
-	existing, err := h.Proj.GetByEmail(ctx, req.Email)
+	existing, err := h.Proj.GetByEmail(ctx, registerTenantID, req.Email)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -102,6 +111,7 @@ func (h *RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Email:        req.Email,
 		DisplayName:  req.DisplayName,
 		PasswordHash: string(hash),
+		TenantID:     registerTenantID,
 	})
 	ev := userlog.Event{
 		ID:          uuid.New().String(),
@@ -140,9 +150,12 @@ func (h *RegisterHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"email":        req.Email,
 		"display_name": req.DisplayName,
 		"permissions":  []string{"iduna.me.read", "users.read.self"},
-		"iss":          issuer,
-		"aud":          "farthq-ecosystem",
-		"exp":          exp.Unix(),
+		// tenant_id -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11), same real claim
+		// local_auth.go's own login path now mints, matching registerTenantID above.
+		"tenant_id": registerTenantID,
+		"iss":       issuer,
+		"aud":       "farthq-ecosystem",
+		"exp":       exp.Unix(),
 	}
 	token, err := authjwt.Sign(h.Keys, claims)
 	if err != nil {

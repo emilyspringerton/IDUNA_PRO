@@ -120,15 +120,32 @@ honest note that the live Vertex network call itself wasn't exercised end to end
 (no active `gcloud` account here) — closed instead with real, network-free unit coverage of the
 response-parsing logic plus a live-reverified fresh-SQLite boot.
 
-**Real, spec-only pass, 2026-09-11 — the real, checked gap this repo has to close next.**
-Founder real-time: "idunapro needs to become truely multi tenant currently its just a fork of
-iduna for carepyre." Checked directly, confirmed true: zero `tenant_id` anywhere in
-`internal/store`, ten `.go` files hardcode `carepyre`/`CarePyre` by name, one process/one SQLite
-file/one JWT key for everyone. `docs/MULTI_TENANCY_NORTHSTAR.md` names the real, sequenced plan
-(a `tenants` table, `tenant_id` on every tenant-owned table, a JWT `tenant_id` claim, per-tenant
-config replacing hardcoded constants) — named as the literal Phase 0 for the sharpened Emily For
-Business pitch ("the Rails for 2026 agents is an API that lets you create APIs," see
-`IDUNA/docs/EMILY_FOR_BUSINESS_NORTHSTAR.md`'s own same-day update). No code yet.
+**Real, shipped, 2026-09-11: Multi-Tenancy Phase 1 — real row-level tenant isolation on
+`local_users`.** Founder real-time: "idunapro needs to become truely multi tenant currently its
+just a fork of iduna for carepyre." `docs/MULTI_TENANCY_NORTHSTAR.md` named the real, sequenced
+plan; Phase 1 is now real and live-verified, not just spec: new `tenants` table (seeded with
+tenant 1 = CarePyre), a new `local_users.tenant_id` column, an explicit `tenantID int` parameter
+on every scoped `userlog.UserProjector` method (`GetByUID`/`GetByEmail`/`ListUsers`/`ScrubPII` —
+compiler-enforced, not read implicitly from context), a new `tenant_id` JWT claim (minted by
+`local_auth.go`/`register.go`), and a new `callerTenantID(r)` helper threaded through every real
+`local_users`-touching handler. A real, found-live security gap was closed in the same pass, not
+deferred: `internal/gdpr`'s own Export/Delete pipeline took a bare `local_uid` with no tenant
+check anywhere in the chain — a tenant-A admin could otherwise export or permanently PII-scrub a
+tenant-B user via the GDPR routes, entirely bypassing the new `UserProjector` scoping. Fixed via a
+new `verifyTenantMembership` check (and `gdpr.ErrNotFound`, mapped to a real 404) run before
+either pipeline touches anything. Real, live-verified end to end against the actual running
+binary (not just `go test`): registered two real users, moved one into a second, hand-inserted
+tenant, and confirmed `GET /api/v1/users` only lists the caller's own tenant, `GET /api/v1/users/
+{cross-tenant-uid}` returns a genuine 404 (never a distinguishable 403), and `POST /api/v1/gdpr/
+export` for a cross-tenant target also 404s with the target's real data provably untouched. New
+tests at every layer (`internal/userlog`, `internal/gdpr`, `internal/http/handlers`) including a
+real trip-wire test pinning the documented, temporary "no tenant_id claim defaults to tenant 1"
+fallback (agent/cookie tokens don't carry the claim yet — Phase 2/4's job) so a future change to
+it fails loudly instead of drifting silently. `go build`/`go vet`/`go test ./...` all clean.
+Real, honest, deliberately out of scope for Phase 1 (see the NORTHSTAR doc's own Phase 2+): every
+other tenant-owned table (`sip_accounts`, `mail_account_credentials`, `resumes`, `organizations`,
+etc.), per-tenant email uniqueness (still a global constraint), and a `tenant_id` claim for
+Google-OAuth/M2M-agent tokens.
 
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:

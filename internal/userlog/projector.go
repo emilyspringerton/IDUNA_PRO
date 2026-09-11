@@ -60,7 +60,17 @@ type LocalUser struct {
 	// provider never picks an org by hand, it's inherited). 0 = no organization assigned, the
 	// safe, backward-compatible default -- see 202609070007_local_users_org_id.sql's own doc
 	// comment for why 0 must never "share a cluster" with anything, including another 0.
-	OrgID     int
+	OrgID int
+	// TenantID -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11, founder real-time: "idunapro
+	// needs to become truely multi tenant currently its just a fork of iduna for carepyre").
+	// Real, deliberate distinction from OrgID above: OrgID is a WITHIN-tenant concept (CarePyre's
+	// own CP-HIPAA-3 agency-cluster hierarchy, entirely internal to one tenant's own data); this
+	// is the actual cross-customer isolation boundary -- a row with a different TenantID than the
+	// caller's own JWT claim must be completely invisible, never just permission-denied. See
+	// migrations/truestore/202609110002_local_users_tenant_id.sql's own doc comment for why this
+	// defaults to 1 (a real fact about every existing row), not 0 (OrgID's own "unassigned"
+	// sentinel).
+	TenantID  int
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -77,17 +87,32 @@ type UserProjector interface {
 	// AdvanceCursor updates the stored cursor to seq.
 	AdvanceCursor(ctx context.Context, seq uint64) error
 
-	// GetByUID returns the user with the given local_uid. Returns nil, nil if not found.
-	GetByUID(ctx context.Context, uid int) (*LocalUser, error)
+	// GetByUID returns the user with the given local_uid, scoped to tenantID. Returns nil, nil
+	// if not found OR if uid belongs to a different tenant -- a cross-tenant lookup must look
+	// IDENTICAL to a genuinely nonexistent uid, never a distinguishable "found but not yours"
+	// (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11: cross-tenant access returns 404, never
+	// 403). tenantID is a real, explicit, compiler-enforced parameter rather than pulled
+	// implicitly from context -- a missing argument is a build error, not a silently-wrong
+	// default; see that document's own "Enforcement mechanism" section for the full reasoning.
+	GetByUID(ctx context.Context, tenantID, uid int) (*LocalUser, error)
 
-	// GetByEmail returns the user with the given email. Returns nil, nil if not found.
-	GetByEmail(ctx context.Context, email string) (*LocalUser, error)
+	// GetByEmail returns the user with the given email within tenantID. Returns nil, nil if not
+	// found in that tenant (even if the email exists under a different tenant -- real, deferred
+	// Phase 2 gap: email uniqueness is still a GLOBAL constraint on the underlying table, see
+	// the 202609110002 migration's own doc comment, so this can't actually happen yet in
+	// practice with more than one real tenant).
+	GetByEmail(ctx context.Context, tenantID int, email string) (*LocalUser, error)
 
-	// ListUsers returns up to limit users ordered by local_uid asc.
-	// Pass limit=0 for no limit (returns all).
-	ListUsers(ctx context.Context, limit int) ([]LocalUser, error)
+	// ListUsers returns up to limit users within tenantID, ordered by local_uid asc.
+	// Pass limit=0 for no limit (returns all of THAT tenant's users, never another tenant's).
+	ListUsers(ctx context.Context, tenantID, limit int) ([]LocalUser, error)
 
-	// NextUID returns max(local_uid)+1 so callers can assign new UIDs sequentially.
+	// NextUID returns max(local_uid)+1 so callers can assign new UIDs sequentially. Deliberately
+	// NOT tenant-scoped -- local_uid stays globally unique across every tenant in this phase (see
+	// MULTI_TENANCY_NORTHSTAR.md Phase 1's own "local_uid stays globally unique" design decision;
+	// changing this to a composite/per-tenant key would cascade into every table with a
+	// local_uid foreign key, real, unnecessary blast radius for proving the mechanism on one
+	// table).
 	NextUID(ctx context.Context) (int, error)
 
 	// ScrubPII overwrites email/display_name/password_hash for uid with a fixed redaction
@@ -98,7 +123,11 @@ type UserProjector interface {
 	// email/display_name/password_hash columns are untouched, so a "deleted" user's real PII
 	// still sits in this table forever. Does NOT touch local_uid, status, or timestamps --
 	// this is a redaction, not a row delete (other tables may still reference local_uid).
-	ScrubPII(ctx context.Context, uid int) error
+	// tenantID scoping added Phase 1 (2026-09-11) -- closes a real, found-live gap where
+	// IDUNA_PRO's own GDPR export/delete pipeline (internal/gdpr) could otherwise redact a
+	// cross-tenant user's PII given nothing but their bare local_uid; see internal/gdpr/gdpr.go's
+	// own verifyTenantMembership for the full write-up.
+	ScrubPII(ctx context.Context, tenantID, uid int) error
 }
 
 // ── event type constants ────────────────────────────────────────────────────
@@ -143,6 +172,15 @@ type UserCreatedData struct {
 	// zero-value, correctly absent/defaulted on every event appended before this field existed)
 	// means no organization -- same safe default LocalUser.OrgID's own doc comment describes.
 	OrgID int `json:"org_id,omitempty"`
+	// TenantID -- MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11). Real, deliberate difference
+	// from OrgID's own "0 is a safe, permanent default" framing: every real creation path in this
+	// phase (webmaster seeding, self-registration, admin createUser) explicitly sets this to a
+	// real tenant id in code -- never left to silently default to the Go zero value -- since 0 is
+	// not a real tenant that exists. Any event appended before this field existed (there are
+	// none yet; this ships alongside the field) would fold in as tenant 0, which matches no real
+	// tenant and would correctly become invisible everywhere, the same fail-safe (not fail-open)
+	// property TenantID's own doc comment on LocalUser describes.
+	TenantID int `json:"tenant_id,omitempty"`
 }
 
 type UserUpdatedData struct {

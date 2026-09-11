@@ -1,10 +1,27 @@
 # NORTHSTAR — IDUNA_PRO Multi-Tenancy (Phase 0 for Emily For Business)
 
-*Spec-only, 2026-09-11. Founder real-time: "idunapro needs to become truely multi tenant currently
-its just a fork of iduna for carepyre." No code changes in this pass — this document names the
-real, checked gap and the real, sequenced plan to close it. See
-`IDUNA/docs/EMILY_FOR_BUSINESS_NORTHSTAR.md` for the strategic "why" this blocks; this document is
-the concrete "how," scoped to this repo's own actual code.*
+*Originally spec-only, 2026-09-11. Founder real-time: "idunapro needs to become truely multi
+tenant currently its just a fork of iduna for carepyre." See `IDUNA/docs/
+EMILY_FOR_BUSINESS_NORTHSTAR.md` for the strategic "why" this blocks; this document is the
+concrete "how," scoped to this repo's own actual code.*
+
+**Status update, same day: Phase 1 shipped and live-verified.** A `tenants` table, a real
+`local_users.tenant_id` column, tenant-scoped `userlog.UserProjector` methods, a `tenant_id` JWT
+claim, and `callerTenantID(r)` are all real and tested (`internal/userlog`, `internal/gdpr`,
+`internal/http/handlers`), including a live, end-to-end proof against the actual running binary:
+two real users, two real tenants, `GET /api/v1/users` correctly scoped, a cross-tenant `GET
+/api/v1/users/{uid}` returning a genuine 404. See `CLAUDE.md`'s own matching Status entry for the
+full writeup. **Real, decisive finding on the "Enforcement mechanism" section below**: the generic
+`TenantScopedDB` query-wrapper (option 1) was never built — it turned out unnecessary for Phase 1
+specifically, because every real `local_users` read/write in this entire codebase already funneled
+through exactly one choke point, the `UserProjector` interface, found during implementation
+(neither this document's own original research nor common sense would have predicted this without
+checking the actual call graph). Adding an explicit, compiler-enforced `tenantID int` parameter to
+that one interface's own methods closed the gap completely, with less new surface area than a
+general wrapper would have needed. **This is not evidence the wrapper is unnecessary in general**
+— Phase 2 (every other tenant-owned table) has NOT been checked for a similarly convenient single
+choke point each, and may genuinely need it; re-evaluate per table, not assumed solved by this
+same trick twice.
 
 ## The real, checked gap — this is not a refactor, it's an unbuilt architectural layer
 
@@ -124,13 +141,15 @@ Postgres backend exists for other reasons anyway.
 
 **Phase 0 — this document.** Named, not built.
 
-**Phase 1 — the `tenants` table + JWT claim + `TenantScopedDB` wrapper (or equivalent), applied to
-ONE real table first** (`local_users` is the natural first candidate — every other tenant-owned
-row already hangs off a `local_uid` foreign key, so making `local_users` itself tenant-aware is
-the load-bearing first cut). Real, concrete Definition of Done: two tenants, two sets of
-`local_users` rows, in the SAME database, verified live that a tenant-A JWT genuinely cannot read
-or list a tenant-B user via any existing `/api/v1/users` route — not just "the code looks right,"
-a real, adversarial test that tries the cross-tenant read and confirms it's refused.
+**Phase 1 — DONE (2026-09-11).** The `tenants` table, `local_users.tenant_id`, and an explicit
+`tenantID int` parameter on `UserProjector`'s own scoped methods (the enforcement mechanism that
+actually shipped — see the status update at the top of this document for why a generic
+`TenantScopedDB` wrapper wasn't needed here). Real Definition of Done met and live-verified, not
+just "the code looks right": two tenants, two sets of `local_users` rows, in the SAME database,
+confirmed live that a tenant-A JWT genuinely cannot read or list a tenant-B user via `/api/v1/
+users` (a real adversarial test, both at the Go-test level and against the actual running binary).
+A real, found-live security gap in `internal/gdpr`'s own Export/Delete pipeline (no tenant check
+at all on an admin's own on-behalf-of target) was found and closed in the same pass.
 
 **Phase 2 — extend `tenant_id` to every remaining tenant-owned table**, one migration per table
 (matching this repo's own established migration discipline — never edit an applied migration,

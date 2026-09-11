@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,31 @@ import (
 
 	"idunapro/internal/userlog"
 )
+
+// ErrNotFound is returned by Export/Delete when localUID does not belong to tenantID -- a real,
+// deliberate signal distinct from any other error, so callers (GDPRHandler) can map it to a real
+// 404 instead of a 500. MULTI_TENANCY_NORTHSTAR.md Phase 1 (2026-09-11): closes a real, found-live
+// gap -- this package's own Export/Delete took a bare local_uid with no tenant check anywhere in
+// the call chain, so a tenant-A admin holding users.admin could otherwise export or permanently
+// PII-scrub a tenant-B user's local_users row via these routes, entirely bypassing the tenant
+// scoping added to UserProjector itself. Cross-tenant access must look identical to "doesn't
+// exist," never a distinguishable "found but not yours" -- same doctrine
+// userlog.UserProjector.GetByUID's own doc comment establishes.
+var ErrNotFound = errors.New("gdpr: local user not found in caller's tenant")
+
+// verifyTenantMembership confirms localUID genuinely belongs to tenantID before Export/Delete are
+// allowed to touch it at all -- checked FIRST, before any gdpr_requests row is even created, so a
+// cross-tenant probe leaves no trace (not even a "failed" request row referencing a foreign uid).
+func verifyTenantMembership(ctx context.Context, deps Deps, tenantID, localUID int) error {
+	u, err := deps.Proj.GetByUID(ctx, tenantID, localUID)
+	if err != nil {
+		return err
+	}
+	if u == nil {
+		return ErrNotFound
+	}
+	return nil
+}
 
 // Deps wires the real state this package needs -- no interface abstraction beyond what already
 // exists (userlog.EventLog/UserProjector), matching how the rest of this codebase's own
@@ -67,14 +93,20 @@ type ExportBundle struct {
 
 // Export runs the real Article 15/20 pipeline: records a request row, gathers everything this
 // instance holds about localUID, writes it as a real JSON file, and marks the request completed
-// (or failed, with a real error_message -- never left stuck at "pending").
-func Export(ctx context.Context, deps Deps, localUID, requestedBy int, exportDir string) (*Request, error) {
+// (or failed, with a real error_message -- never left stuck at "pending"). tenantID is the
+// CALLER's own tenant (MULTI_TENANCY_NORTHSTAR.md Phase 1) -- verified against localUID's own
+// real tenant before anything else happens; see ErrNotFound's own doc comment for why.
+func Export(ctx context.Context, deps Deps, tenantID, localUID, requestedBy int, exportDir string) (*Request, error) {
+	if err := verifyTenantMembership(ctx, deps, tenantID, localUID); err != nil {
+		return nil, err
+	}
+
 	req, err := createRequest(ctx, deps.DB, localUID, "export", requestedBy)
 	if err != nil {
 		return nil, err
 	}
 
-	bundle, err := buildExportBundle(ctx, deps, localUID)
+	bundle, err := buildExportBundle(ctx, deps, tenantID, localUID)
 	if err != nil {
 		return failRequest(ctx, deps.DB, req, fmt.Errorf("build export: %w", err))
 	}
@@ -108,7 +140,11 @@ func Export(ctx context.Context, deps Deps, localUID, requestedBy int, exportDir
 // (UserProjector.ScrubPII), and removes rows from any per-tenant PII-bearing extension tables
 // that reference this uid (sip_accounts, mail_account_credentials -- CarePyre-originated
 // extensions that may or may not exist on a given tenant; missing tables are not an error).
-func Delete(ctx context.Context, deps Deps, localUID, requestedBy int) (*Request, error) {
+func Delete(ctx context.Context, deps Deps, tenantID, localUID, requestedBy int) (*Request, error) {
+	if err := verifyTenantMembership(ctx, deps, tenantID, localUID); err != nil {
+		return nil, err
+	}
+
 	req, err := createRequest(ctx, deps.DB, localUID, "delete", requestedBy)
 	if err != nil {
 		return nil, err
@@ -123,7 +159,7 @@ func Delete(ctx context.Context, deps Deps, localUID, requestedBy int) (*Request
 		return failRequest(ctx, deps.DB, req, fmt.Errorf("redact event log: %w", err))
 	}
 
-	if err := deps.Proj.ScrubPII(ctx, localUID); err != nil {
+	if err := deps.Proj.ScrubPII(ctx, tenantID, localUID); err != nil {
 		return failRequest(ctx, deps.DB, req, fmt.Errorf("scrub projection: %w", err))
 	}
 
@@ -170,6 +206,13 @@ func failRequest(ctx context.Context, db *sql.DB, req *Request, cause error) (*R
 }
 
 // ListRequests returns every GDPR request, newest first (admin view / audit trail).
+//
+// Real, honest, accepted residual (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): this is NOT
+// tenant-scoped -- gdpr_requests has no tenant_id column of its own (out of this phase's
+// deliberately one-table scope), so a tenant-A users.admin holder calling this still sees every
+// OTHER tenant's request metadata too (which local_uid requested what, when, status) -- not the
+// PII values themselves, which stay real, tenant-scoped-and-verified via Export/Delete above.
+// Named directly as a real, deferred Phase 2 gap, not silently left unaddressed.
 func ListRequests(ctx context.Context, db *sql.DB) ([]Request, error) {
 	return queryRequests(ctx, db, `SELECT id, local_uid, request_type, status, requested_by, COALESCE(export_path,''), COALESCE(result_summary,''), COALESCE(error_message,''), created_at, COALESCE(completed_at,'') FROM gdpr_requests ORDER BY id DESC`)
 }

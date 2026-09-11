@@ -13,9 +13,11 @@ import (
 )
 
 // buildExportBundle gathers everything this IDUNA_PRO instance actually holds about localUID --
-// the real Article 15/20 payload.
-func buildExportBundle(ctx context.Context, deps Deps, localUID int) (*ExportBundle, error) {
-	profile, err := deps.Proj.GetByUID(ctx, localUID)
+// the real Article 15/20 payload. tenantID is already verified (Export's own
+// verifyTenantMembership call, above) by the time this runs; the tenant-scoped GetByUID call here
+// is real, deliberate defense in depth, not the only check.
+func buildExportBundle(ctx context.Context, deps Deps, tenantID, localUID int) (*ExportBundle, error) {
+	profile, err := deps.Proj.GetByUID(ctx, tenantID, localUID)
 	if err != nil {
 		return nil, fmt.Errorf("load profile: %w", err)
 	}

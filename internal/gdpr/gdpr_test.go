@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,7 @@ func setupDeps(t *testing.T) (gdpr.Deps, *sql.DB) {
 			is_provider_admin INTEGER NOT NULL DEFAULT 0,
 			is_community_tools_enabled INTEGER NOT NULL DEFAULT 0,
 			org_id INTEGER NOT NULL DEFAULT 0,
+			tenant_id INTEGER NOT NULL DEFAULT 1,
 			created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE (email)
@@ -81,7 +83,7 @@ func setupDeps(t *testing.T) (gdpr.Deps, *sql.DB) {
 		ID:   "e1",
 		Type: userlog.EventUserCreated,
 		Data: mustJSON(t, userlog.UserCreatedData{
-			LocalUID: 5, Email: "subject@example.com", DisplayName: "Real Name", PasswordHash: "realhash",
+			LocalUID: 5, Email: "subject@example.com", DisplayName: "Real Name", PasswordHash: "realhash", TenantID: 1,
 		}),
 	})
 	if err != nil {
@@ -111,7 +113,7 @@ func TestExport_WritesRealBundleAndCompletesRequest(t *testing.T) {
 	deps, db := setupDeps(t)
 	exportDir := t.TempDir()
 
-	req, err := gdpr.Export(context.Background(), deps, 5, 5, exportDir)
+	req, err := gdpr.Export(context.Background(), deps, 1, 5, 5, exportDir)
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -152,7 +154,7 @@ func TestExport_WritesRealBundleAndCompletesRequest(t *testing.T) {
 func TestDelete_ErasesPIIAndScrubsExtensions(t *testing.T) {
 	deps, db := setupDeps(t)
 
-	req, err := gdpr.Delete(context.Background(), deps, 5, 5)
+	req, err := gdpr.Delete(context.Background(), deps, 1, 5, 5)
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -163,7 +165,7 @@ func TestDelete_ErasesPIIAndScrubsExtensions(t *testing.T) {
 		t.Errorf("expected result summary to mention sip_accounts, got %q", req.ResultSummary)
 	}
 
-	u, err := deps.Proj.GetByUID(context.Background(), 5)
+	u, err := deps.Proj.GetByUID(context.Background(), 1, 5)
 	if err != nil {
 		t.Fatalf("GetByUID: %v", err)
 	}
@@ -191,7 +193,7 @@ func TestDelete_ErasesPIIAndScrubsExtensions(t *testing.T) {
 func TestListRequests_ScopesByUser(t *testing.T) {
 	deps, db := setupDeps(t)
 
-	if _, err := gdpr.Export(context.Background(), deps, 5, 5, t.TempDir()); err != nil {
+	if _, err := gdpr.Export(context.Background(), deps, 1, 5, 5, t.TempDir()); err != nil {
 		t.Fatalf("Export: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO gdpr_requests (local_uid, request_type, status, requested_by) VALUES (9, 'export', 'completed', 9)`); err != nil {
@@ -212,5 +214,91 @@ func TestListRequests_ScopesByUser(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("expected 2 requests total, got %d", len(all))
+	}
+}
+
+// seedTenant2User adds a second real user (uid 6) under tenant 2, sibling to setupDeps' own
+// tenant-1 uid-5 seed -- for MULTI_TENANCY_NORTHSTAR.md Phase 1's own real adversarial proof
+// below: a tenant-1 admin must not be able to export or delete this user via gdpr.Export/Delete.
+func seedTenant2User(t *testing.T, deps gdpr.Deps) {
+	t.Helper()
+	rec, err := deps.Log.Append(context.Background(), userlog.Event{
+		ID:   "e2",
+		Type: userlog.EventUserCreated,
+		Data: mustJSON(t, userlog.UserCreatedData{
+			LocalUID: 6, Email: "other-tenant@example.com", DisplayName: "Other Tenant", PasswordHash: "otherhash", TenantID: 2,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("seed tenant-2 Append: %v", err)
+	}
+	if err := deps.Proj.Apply(context.Background(), rec[0]); err != nil {
+		t.Fatalf("seed tenant-2 Apply: %v", err)
+	}
+}
+
+// TestExport_CrossTenantTargetReturnsErrNotFound -- the real, found-live gap fix
+// (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): before this, Export took a bare local_uid
+// with no tenant check anywhere in the call chain -- a tenant-1 admin could export a tenant-2
+// user's full profile+event history+extension data. Now it must refuse, via the exact same real
+// "looks like it doesn't exist" doctrine the rest of this phase establishes.
+func TestExport_CrossTenantTargetReturnsErrNotFound(t *testing.T) {
+	deps, _ := setupDeps(t)
+	seedTenant2User(t, deps)
+
+	// Tenant 1 admin (uid 5, this repo's own seeded user) tries to export tenant 2's uid 6.
+	_, err := gdpr.Export(context.Background(), deps, 1, 6, 5, t.TempDir())
+	if !errors.Is(err, gdpr.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound exporting a cross-tenant target, got: %v", err)
+	}
+
+	// Real, decisive proof this didn't even leave a trace: no gdpr_requests row at all for the
+	// cross-tenant attempt, matching verifyTenantMembership's own "checked before createRequest"
+	// design (a cross-tenant probe should look identical to never having happened).
+	all, lerr := gdpr.ListRequests(context.Background(), deps.DB)
+	if lerr != nil {
+		t.Fatalf("ListRequests: %v", lerr)
+	}
+	for _, r := range all {
+		if r.LocalUID == 6 {
+			t.Fatalf("expected no gdpr_requests row referencing the cross-tenant target, found: %+v", r)
+		}
+	}
+}
+
+// TestDelete_CrossTenantTargetReturnsErrNotFound -- same real gap, the more severe half: without
+// this fix, a tenant-1 admin could PERMANENTLY, IRREVERSIBLY scrub a tenant-2 user's real PII.
+func TestDelete_CrossTenantTargetReturnsErrNotFound(t *testing.T) {
+	deps, _ := setupDeps(t)
+	seedTenant2User(t, deps)
+
+	_, err := gdpr.Delete(context.Background(), deps, 1, 6, 5)
+	if !errors.Is(err, gdpr.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound deleting a cross-tenant target, got: %v", err)
+	}
+
+	// Real, decisive proof the tenant-2 user's PII genuinely survives untouched.
+	u, gerr := deps.Proj.GetByUID(context.Background(), 2, 6)
+	if gerr != nil {
+		t.Fatalf("GetByUID: %v", gerr)
+	}
+	if u == nil || u.Email != "other-tenant@example.com" {
+		t.Fatalf("expected the cross-tenant target's real PII to survive untouched, got: %+v", u)
+	}
+}
+
+// TestExport_SameTenantTargetStillWorks -- a real regression guard: the fix above must not make
+// an admin unable to act on-behalf-of a user genuinely in their OWN tenant.
+func TestExport_SameTenantTargetStillWorks(t *testing.T) {
+	deps, _ := setupDeps(t)
+	seedTenant2User(t, deps)
+
+	// Tenant 1 admin (uid 5) exports uid 5 itself -- same tenant, self-service, must still work.
+	req, err := gdpr.Export(context.Background(), deps, 1, 5, 5, t.TempDir())
+	if err != nil {
+		t.Fatalf("expected a same-tenant export to still succeed, got: %v", err)
+	}
+	if req.Status != "completed" {
+		t.Fatalf("expected status completed, got %q (error=%q)", req.Status, req.ErrorMessage)
 	}
 }

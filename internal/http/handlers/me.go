@@ -35,7 +35,7 @@ func (h *MeHandler) localUserIdentity(w http.ResponseWriter, r *http.Request, su
 		})
 		return
 	}
-	u, err := h.Proj.GetByUID(r.Context(), uid)
+	u, err := h.Proj.GetByUID(r.Context(), callerTenantID(r), uid)
 	if err != nil || u == nil {
 		writeJSON(w, http.StatusNotFound, map[string]any{
 			"code":    "NOT_FOUND",

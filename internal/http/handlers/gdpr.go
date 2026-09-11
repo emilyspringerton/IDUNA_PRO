@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -63,19 +64,24 @@ func (h *GDPRHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // resolveTarget returns the local_uid this request targets: the caller's own uid by default, or
 // a different uid from the request body if the caller holds users.admin. Writes a response and
 // returns ok=false if the caller is unauthenticated or lacks admin for an on-behalf-of request.
-func (h *GDPRHandler) resolveTarget(w http.ResponseWriter, r *http.Request) (target, caller int, ok bool) {
+// Also returns the caller's own tenantID (MULTI_TENANCY_NORTHSTAR.md Phase 1) -- gdpr.Export/
+// Delete verify the target genuinely belongs to THIS tenant before touching anything, closing a
+// real, found-live gap where an on-behalf-of request had no tenant check anywhere in the chain
+// (see internal/gdpr/gdpr.go's own ErrNotFound doc comment for the full write-up).
+func (h *GDPRHandler) resolveTarget(w http.ResponseWriter, r *http.Request) (target, caller, tenantID int, ok bool) {
 	callerUID := callerLocalUID(r)
 	if callerUID == nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
+	tenantID = callerTenantID(r)
 
 	target = *callerUID
 	if r.ContentLength != 0 {
 		var req gdprActRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
-			return 0, 0, false
+			return 0, 0, 0, false
 		}
 		if req.LocalUID != nil {
 			target = *req.LocalUID
@@ -84,17 +90,21 @@ func (h *GDPRHandler) resolveTarget(w http.ResponseWriter, r *http.Request) (tar
 
 	if target != *callerUID && !hasPermission(r, "users.admin") {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
-	return target, *callerUID, true
+	return target, *callerUID, tenantID, true
 }
 
 func (h *GDPRHandler) export(w http.ResponseWriter, r *http.Request) {
-	target, caller, ok := h.resolveTarget(w, r)
+	target, caller, tenantID, ok := h.resolveTarget(w, r)
 	if !ok {
 		return
 	}
-	result, err := gdpr.Export(r.Context(), h.Deps, target, caller, h.ExportDir)
+	result, err := gdpr.Export(r.Context(), h.Deps, tenantID, target, caller, h.ExportDir)
+	if errors.Is(err, gdpr.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -103,11 +113,15 @@ func (h *GDPRHandler) export(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *GDPRHandler) delete(w http.ResponseWriter, r *http.Request) {
-	target, caller, ok := h.resolveTarget(w, r)
+	target, caller, tenantID, ok := h.resolveTarget(w, r)
 	if !ok {
 		return
 	}
-	result, err := gdpr.Delete(r.Context(), h.Deps, target, caller)
+	result, err := gdpr.Delete(r.Context(), h.Deps, tenantID, target, caller)
+	if errors.Is(err, gdpr.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
