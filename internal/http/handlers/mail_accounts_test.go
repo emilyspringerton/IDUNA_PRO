@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,6 +41,7 @@ func newTestMailAccountsHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sq
 			password_enc TEXT     NOT NULL,
 			created_by   INTEGER,
 			owning_org_id INTEGER NOT NULL DEFAULT 0,
+			tenant_id    INTEGER NOT NULL DEFAULT 1,
 			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);
@@ -224,5 +226,47 @@ func TestMailAccountsHandler_ClusterMateCanRevealAndListAcrossOrgs(t *testing.T)
 	h.ServeHTTP(rec2, rr2)
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 for an org with no shared cluster, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): the real adversarial test. Before this fix,
+// revealPassword's `if !hasPermission(r, "users.admin")` block meant a users.admin caller
+// bypassed EVERY row-level check -- once a second tenant is real, any tenant's admin could reveal
+// the live, decrypted mailbox password for every OTHER tenant's participants too. This test
+// exercises only revealPassword (not list), matching this file's own existing scope: list()'s
+// Stalwart-backed accounts require a live client this test double doesn't mock, so its equivalent
+// tenant filter (mail_accounts.go's own list(), same tenantID/c.tenantID comparison) is verified
+// by direct code inspection rather than a second, redundant harness here.
+func TestMailAccountsHandler_AdminCannotRevealCrossTenantMailboxPassword(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	h, db := newTestMailAccountsHandler(t, keys)
+
+	if _, err := db.Exec(`INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, tenant_id) VALUES (100, 'tenant1@example.test', 'enc1', 1, 1)`); err != nil {
+		t.Fatalf("seed tenant 1 mailbox: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, tenant_id) VALUES (200, 'tenant2@example.test', 'enc2', 2, 2)`); err != nil {
+		t.Fatalf("seed tenant 2 mailbox: %v", err)
+	}
+
+	tenant1AdminToken := tenantToken(t, keys, 1, 1, "users.admin")
+
+	cross := httptest.NewRequest(http.MethodGet, "/api/v1/mail-accounts/200/reveal-password", nil)
+	cross.Header.Set("Authorization", "Bearer "+tenant1AdminToken)
+	crossRR := httptest.NewRecorder()
+	h.ServeHTTP(crossRR, cross)
+	if crossRR.Code != http.StatusNotFound {
+		t.Fatalf("tenant-1 admin revealing tenant-2's mailbox password: status = %d, body = %s, want 404 (real cross-tenant leak if not)", crossRR.Code, crossRR.Body.String())
+	}
+	if strings.Contains(crossRR.Body.String(), "enc2") {
+		t.Fatalf("tenant-2's encrypted secret leaked into a 404 response body: %s", crossRR.Body.String())
+	}
+
+	// Regression: same-tenant reveal must still work.
+	own := httptest.NewRequest(http.MethodGet, "/api/v1/mail-accounts/100/reveal-password", nil)
+	own.Header.Set("Authorization", "Bearer "+tenant1AdminToken)
+	ownRR := httptest.NewRecorder()
+	h.ServeHTTP(ownRR, own)
+	if ownRR.Code == http.StatusNotFound || ownRR.Code == http.StatusForbidden {
+		t.Fatalf("tenant-1 admin revealing tenant-1's own mailbox: status = %d, body = %s, want success", ownRR.Code, ownRR.Body.String())
 	}
 }

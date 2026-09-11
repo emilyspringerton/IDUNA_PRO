@@ -372,8 +372,16 @@ func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 		callerOrg = callerOrgID(r)
 	}
 
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): the real tenant boundary, applied to BOTH
+	// admin and non-admin callers -- unlike the ownCreation/clusterMate check below (a WITHIN-tenant
+	// minimum-necessary scoping users.admin is deliberately allowed to bypass), a caller must never
+	// see another tenant's SIP extension at all. Every sip_accounts row has a real local_uid (its
+	// own primary key), so unlike mail_account_credentials there's no "unlinked, no tenant to check"
+	// carve-out needed here.
+	tenantID := callerTenantID(r)
+
 	rows, err := h.DB.QueryContext(r.Context(),
-		`SELECT local_uid, extension, sip_server, sip_port, updated_at, created_by, owning_org_id FROM sip_accounts ORDER BY local_uid`)
+		`SELECT local_uid, extension, sip_server, sip_port, updated_at, created_by, owning_org_id, tenant_id FROM sip_accounts ORDER BY local_uid`)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -383,10 +391,13 @@ func (h *SipAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a sipAccount
 		var createdBy sql.NullInt64
-		var owningOrgID int
-		if err := rows.Scan(&a.LocalUID, &a.Extension, &a.SipServer, &a.SipPort, &a.UpdatedAt, &createdBy, &owningOrgID); err != nil {
+		var owningOrgID, rowTenantID int
+		if err := rows.Scan(&a.LocalUID, &a.Extension, &a.SipServer, &a.SipPort, &a.UpdatedAt, &createdBy, &owningOrgID, &rowTenantID); err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
+		}
+		if rowTenantID != tenantID {
+			continue
 		}
 		if !isAdmin {
 			ownCreation := createdBy.Valid && callerUID != nil && int(createdBy.Int64) == *callerUID
@@ -422,6 +433,23 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 		req.SipPort = 5060
 	}
 
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: the real tenant boundary, checked for BOTH admin and
+	// non-admin callers, BEFORE the admin bypass below -- a sip_accounts row may not exist yet for
+	// this uid (upsert is insert-or-update), so this can't be checked against an existing row's own
+	// tenant_id the way list()/remove() can; local_users is the authoritative source of the
+	// target's real tenant instead. 404, not 403, and ONLY when the target's tenant is actually
+	// known and different: this is deliberately narrower than "the uid must exist in local_users at
+	// all" -- CP-HIPAA-2's own existing, deliberate 403 ("not yours to touch," distinguishable from
+	// "doesn't exist" -- see remove()'s own established precedent) for a genuinely unrelated
+	// participant must not be swallowed into an ambiguous 404 just because this uid has no
+	// local_users row (e.g. hasn't self-registered yet, but a provider is still allowed to try and
+	// correctly get a real, disclosed 403 for it).
+	tenantID := callerTenantID(r)
+	if rowTenantID, ok := localUserTenantID(r.Context(), h.DB, uid); ok && rowTenantID != tenantID {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+
 	callerUID := operatorUIDFromContext(r)
 	callerOrg := callerOrgID(r)
 	if !hasPermission(r, "users.admin") {
@@ -442,14 +470,14 @@ func (h *SipAccountsHandler) upsert(w http.ResponseWriter, r *http.Request, uid 
 	// already establishes) -- a cluster-mate updating an existing extension must not silently
 	// reassign its owning organization to their own.
 	_, err := h.DB.ExecContext(r.Context(), `
-		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by, owning_org_id, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, created_by, owning_org_id, tenant_id, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			extension = excluded.extension,
 			sip_server = excluded.sip_server,
 			sip_port = excluded.sip_port,
 			updated_at = excluded.updated_at
-	`, uid, req.Extension, req.SipServer, req.SipPort, callerUID, callerOrg, now)
+	`, uid, req.Extension, req.SipServer, req.SipPort, callerUID, callerOrg, tenantID, now)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
@@ -507,7 +535,11 @@ func (h *SipAccountsHandler) remove(w http.ResponseWriter, r *http.Request, uid 
 			return
 		}
 	}
-	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM sip_accounts WHERE local_uid = ?`, uid)
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: folding "AND tenant_id = ?" directly into the DELETE
+	// (rather than a separate lookup-then-check) means a cross-tenant target naturally falls out
+	// as RowsAffected==0 -- the exact same 404 a genuinely nonexistent uid already produced below,
+	// with no separate branch needed and no way to distinguish the two cases from the response.
+	res, err := h.DB.ExecContext(r.Context(), `DELETE FROM sip_accounts WHERE local_uid = ? AND tenant_id = ?`, uid, callerTenantID(r))
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

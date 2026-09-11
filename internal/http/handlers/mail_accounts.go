@@ -120,16 +120,17 @@ func (h *MailAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 		localUID    int
 		createdBy   sql.NullInt64
 		owningOrgID int
+		tenantID    int
 	}
 	credByEmail := map[string]credRow{}
 	if h.DB != nil {
-		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email, created_by, owning_org_id FROM mail_account_credentials`)
+		rows, err := h.DB.QueryContext(r.Context(), `SELECT local_uid, email, created_by, owning_org_id, tenant_id FROM mail_account_credentials`)
 		if err == nil {
 			defer rows.Close()
 			for rows.Next() {
 				var c credRow
 				var email string
-				if rows.Scan(&c.localUID, &email, &c.createdBy, &c.owningOrgID) == nil {
+				if rows.Scan(&c.localUID, &email, &c.createdBy, &c.owningOrgID, &c.tenantID) == nil {
 					credByEmail[strings.ToLower(email)] = c
 				}
 			}
@@ -149,9 +150,21 @@ func (h *MailAccountsHandler) list(w http.ResponseWriter, r *http.Request) {
 		callerOrg = callerOrgID(r)
 	}
 
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): the real tenant boundary. This applies to
+	// BOTH admin and non-admin callers -- unlike the ownCreation/clusterMate check above (a
+	// WITHIN-tenant minimum-necessary scoping that users.admin is deliberately allowed to bypass),
+	// a caller must never see another tenant's linked mailbox at all, admin or not. An unlinked
+	// Stalwart account (no mail_account_credentials row) has no tenant_id to check -- Stalwart
+	// itself isn't tenant-partitioned yet, a real, named residual, not silently swept under
+	// "linked" handling.
+	tenantID := callerTenantID(r)
+
 	out := make([]mailAccountWithOwner, 0, len(accounts))
 	for _, a := range accounts {
 		c, linked := credByEmail[strings.ToLower(a.EmailAddress)]
+		if linked && c.tenantID != tenantID {
+			continue
+		}
 		if !isAdmin {
 			ownCreation := linked && c.createdBy.Valid && callerUID != nil && int(c.createdBy.Int64) == *callerUID
 			clusterMate := linked && orgsShareCluster(r.Context(), h.DB, callerOrg, c.owningOrgID)
@@ -279,14 +292,18 @@ func (h *MailAccountsHandler) storeCredential(r *http.Request, uid int, email, p
 	// "snapshot, don't live-join" idiom created_by already established) -- the real fact a
 	// cluster-mate provider's own list/reveal-password access is scoped against.
 	owningOrgID := callerOrgID(r)
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: tenant_id snapshots the CALLER's own tenant at
+	// provisioning time, same idiom as owning_org_id above -- never touched by the ON CONFLICT
+	// update, so a later re-provision can't silently move a mailbox to a different tenant.
+	tenantID := callerTenantID(r)
 	_, err = h.DB.ExecContext(r.Context(), `
-		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, owning_org_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO mail_account_credentials (local_uid, email, password_enc, created_by, owning_org_id, tenant_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(local_uid) DO UPDATE SET
 			email = excluded.email,
 			password_enc = excluded.password_enc,
 			updated_at = excluded.updated_at
-	`, uid, email, enc, createdBy, owningOrgID, now, now)
+	`, uid, email, enc, createdBy, owningOrgID, tenantID, now, now)
 	return err
 }
 
@@ -303,15 +320,25 @@ func (h *MailAccountsHandler) revealPassword(w http.ResponseWriter, r *http.Requ
 	}
 	var email, enc string
 	var createdBy sql.NullInt64
-	var owningOrgID int
+	var owningOrgID, rowTenantID int
 	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT email, password_enc, created_by, owning_org_id FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc, &createdBy, &owningOrgID)
+		`SELECT email, password_enc, created_by, owning_org_id, tenant_id FROM mail_account_credentials WHERE local_uid = ?`, uid).Scan(&email, &enc, &createdBy, &owningOrgID, &rowTenantID)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no mailbox linked to this user"})
 		return
 	}
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: the real tenant boundary, checked BEFORE the
+	// admin-bypass block below and for every caller including users.admin -- revealing a live
+	// decrypted mailbox password is the single most sensitive read this handler exposes, so this
+	// is the last place a cross-tenant admin bypass could be tolerated. Same "404, not 403" idiom
+	// Phase 1 established: a cross-tenant probe gets byte-for-byte the same response as a genuinely
+	// unlinked uid, so it can never be used to confirm another tenant's mailbox exists.
+	if rowTenantID != callerTenantID(r) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no mailbox linked to this user"})
 		return
 	}
 	// CP-HIPAA-1/CP-HIPAA-3 minimum-necessary scoping: a provider-only caller may reveal a

@@ -147,6 +147,26 @@ other tenant-owned table (`sip_accounts`, `mail_account_credentials`, `resumes`,
 etc.), per-tenant email uniqueness (still a global constraint), and a `tenant_id` claim for
 Google-OAuth/M2M-agent tokens.
 
+**Real, shipped same day: Multi-Tenancy Phase 2's first slice — `mail_account_credentials` +
+`sip_accounts`.** Found by direct inspection right after Phase 1 landed: both tables already had
+real Go-side filtering by `owning_org_id`/`created_by` for a non-admin caller, but a `users.admin`
+caller bypassed it entirely — `mail_accounts.go`'s `list()` had no `WHERE` clause at all,
+`revealPassword()` returned a live, decrypted mailbox password to any admin regardless of tenant,
+and `sip_accounts.go`'s `upsert()`/`remove()` let an admin hijack or delete any tenant's phone
+extension. Same vulnerability class as the GDPR gap, one layer down. Fixed with a new `tenant_id`
+column on both tables (migration `202609111001_mail_and_sip_tenant_id.sql`, backfilled via a real
+join to `local_users.tenant_id`), a new `localUserTenantID` helper (for `sip_accounts.upsert`'s
+insert-or-update case, where no existing row's own `tenant_id` can be checked yet), and the same
+404-not-403 idiom throughout. New adversarial tests at the Go-test level
+(`TestMailAccountsHandler_AdminCannotRevealCrossTenantMailboxPassword`,
+`TestSipAccounts_AdminCannotSeeOrTouchCrossTenantAccount`) plus live verification against the
+actual running binary: two real tenants, `GET /api/v1/sip-accounts` correctly scoped, cross-tenant
+`PUT`/`DELETE /api/v1/sip-accounts/{uid}` both 404 with the target row provably untouched, and a
+cross-tenant `GET /api/v1/mail-accounts/{uid}/reveal-password` returning 404 instead of leaking the
+real password. `go build`/`go vet`/`go test ./...` all clean. Remaining Phase 2 tables named, not
+yet audited: `resumes`/`resume_targets`/`community_tools`, `gdpr_requests` (`?all=1` residual),
+`branding_settings`, `compliance_recordings`.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),

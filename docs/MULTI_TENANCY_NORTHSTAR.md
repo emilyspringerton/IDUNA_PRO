@@ -23,6 +23,24 @@ general wrapper would have needed. **This is not evidence the wrapper is unneces
 choke point each, and may genuinely need it; re-evaluate per table, not assumed solved by this
 same trick twice.
 
+**Status update, same day, continued: Phase 2's first real slice shipped and live-verified too**
+(`mail_account_credentials`, `sip_accounts`). Found by direct code inspection right after Phase 1
+landed: both tables already had real, careful Go-side filtering by `owning_org_id`/`created_by`
+for a non-admin (provider-only) caller — but a `users.admin` caller bypassed that filtering
+entirely (`mail_accounts.go`'s `list()` had no `WHERE` clause at all; `revealPassword()`,
+`sip_accounts.go`'s `upsert()`/`remove()` all skipped the ownership check outright for admins).
+The exact same vulnerability shape the GDPR fix closed for `local_users`, one layer down — and
+worse in one respect: `revealPassword()` returns a live, decrypted mailbox password, and
+`sip_accounts` had no choke-point interface at all (unlike `UserProjector`), so this needed the
+generic-per-table treatment the note above said Phase 2 might require. Fixed with `tenant_id`
+columns added to both tables (backfilled via a real join to `local_users.tenant_id`, not a bare
+constant), a new `localUserTenantID` helper for the one case (`sip_accounts.upsert`) where a
+target row might not exist yet, and the same 404-not-403 idiom throughout. Live-verified against
+the real running binary: two real tenants, `GET /api/v1/sip-accounts` correctly scoped, a
+cross-tenant `PUT`/`DELETE /api/v1/sip-accounts/{uid}` both returning genuine 404s with the
+target row provably untouched, and a cross-tenant `GET /api/v1/mail-accounts/{uid}/reveal-password`
+returning 404 instead of a live plaintext password.
+
 ## The real, checked gap — this is not a refactor, it's an unbuilt architectural layer
 
 Checked directly against this repo's own source, not assumed:
@@ -154,7 +172,12 @@ at all on an admin's own on-behalf-of target) was found and closed in the same p
 **Phase 2 — extend `tenant_id` to every remaining tenant-owned table**, one migration per table
 (matching this repo's own established migration discipline — never edit an applied migration,
 always add a new one), each with its own real cross-tenant-read-refused test, not a bulk
-find-and-replace trusted without per-table verification.
+find-and-replace trusted without per-table verification. **First slice DONE (2026-09-11):**
+`mail_account_credentials` + `sip_accounts` — see the status update above for the full writeup.
+Remaining known tenant-owned tables not yet touched: `resumes`/`resume_targets`/`community_tools`
+(Community Tools feature), `gdpr_requests` (`ListRequests`'s own `?all=1` residual, named but not
+fixed in the GDPR pass), `branding_settings`, `compliance_recordings`. Not yet audited for the
+same "admin bypasses everything" shape — check each individually before assuming it's clean.
 
 **Phase 3 — per-tenant configuration** (domain/branding/feature flags), replacing the hardcoded
 `carepyre`/`CarePyre` references named above one at a time — CarePyre itself becomes tenant #1 in

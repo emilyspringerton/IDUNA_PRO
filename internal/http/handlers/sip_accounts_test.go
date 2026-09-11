@@ -32,11 +32,21 @@ func newTestSipAccountsDB(t *testing.T) *sql.DB {
 		sip_port    INTEGER  NOT NULL DEFAULT 5060,
 		created_by  INTEGER,
 		owning_org_id INTEGER NOT NULL DEFAULT 0,
+		tenant_id   INTEGER NOT NULL DEFAULT 1,
 		created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`)
 	if err != nil {
 		t.Fatalf("create sip_accounts table: %v", err)
+	}
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: local_users is the authoritative source
+	// localUserTenantID (used by upsert's tenant gate) reads from -- a minimal stand-in for the
+	// real table's own tenant_id column, not the full userlog-backed schema.
+	if _, err := db.Exec(`CREATE TABLE local_users (
+		local_uid INTEGER PRIMARY KEY,
+		tenant_id INTEGER NOT NULL DEFAULT 1
+	)`); err != nil {
+		t.Fatalf("create local_users table: %v", err)
 	}
 	if _, err := db.Exec(`
 		CREATE TABLE organizations (
@@ -392,6 +402,7 @@ func newTestSipAccountsDBWithMailCreds(t *testing.T) *sql.DB {
 		password_enc TEXT     NOT NULL,
 		created_by   INTEGER,
 		owning_org_id INTEGER NOT NULL DEFAULT 0,
+		tenant_id    INTEGER NOT NULL DEFAULT 1,
 		created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 		updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 	)`); err != nil {
@@ -526,5 +537,81 @@ func TestSipAccounts_ClusterMateCanProvisionAndList(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("expected exactly 1 SIP account visible to the cluster-mate, got %d: %+v", len(got), got)
+	}
+}
+
+// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): the real adversarial test. Before this fix,
+// list() had no tenant filter at all and upsert()/remove() let a users.admin caller act on ANY
+// uid's SIP account -- once a second tenant is real, any tenant's admin could see, silently
+// hijack (upsert), or delete another tenant's phone extension outright.
+func TestSipAccounts_AdminCannotSeeOrTouchCrossTenantAccount(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	db := newTestSipAccountsDB(t)
+	h := sipAccountsHandlerWithAuth(keys, db)
+
+	if _, err := db.Exec(`INSERT INTO local_users (local_uid, tenant_id) VALUES (100, 1), (200, 2)`); err != nil {
+		t.Fatalf("seed local_users: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, tenant_id) VALUES (100, '1000', 'x', 5060, 1)`); err != nil {
+		t.Fatalf("seed tenant 1 sip account: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO sip_accounts (local_uid, extension, sip_server, sip_port, tenant_id) VALUES (200, '2000', 'x', 5060, 2)`); err != nil {
+		t.Fatalf("seed tenant 2 sip account: %v", err)
+	}
+
+	adminToken := tenantToken(t, keys, 1, 1, "users.admin")
+
+	// list() must never surface tenant 2's SIP account to a tenant-1 admin.
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/sip-accounts", nil)
+	listReq.Header.Set("Authorization", "Bearer "+adminToken)
+	listRR := httptest.NewRecorder()
+	h.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, body = %s", listRR.Code, listRR.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(listRR.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got) != 1 || got[0]["local_uid"].(float64) != 100 {
+		t.Fatalf("tenant-1 admin list: expected exactly tenant 1's own account only, got %+v", got)
+	}
+
+	// upsert() must 404, not silently hijack, a tenant-2 uid's extension.
+	hijackBody, _ := json.Marshal(map[string]any{"extension": "9999", "sip_server": "evil.example", "sip_port": 5060})
+	upsertReq := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/200", bytes.NewReader(hijackBody))
+	upsertReq.Header.Set("Authorization", "Bearer "+adminToken)
+	upsertRR := httptest.NewRecorder()
+	h.ServeHTTP(upsertRR, upsertReq)
+	if upsertRR.Code != http.StatusNotFound {
+		t.Fatalf("tenant-1 admin upsert on tenant-2 uid: status = %d, body = %s, want 404 (real cross-tenant hijack if not)", upsertRR.Code, upsertRR.Body.String())
+	}
+
+	// remove() must 404, not delete, a tenant-2 row.
+	removeReq := httptest.NewRequest(http.MethodDelete, "/api/v1/sip-accounts/200", nil)
+	removeReq.Header.Set("Authorization", "Bearer "+adminToken)
+	removeRR := httptest.NewRecorder()
+	h.ServeHTTP(removeRR, removeReq)
+	if removeRR.Code != http.StatusNotFound {
+		t.Fatalf("tenant-1 admin remove on tenant-2 uid: status = %d, body = %s, want 404 (real cross-tenant deletion if not)", removeRR.Code, removeRR.Body.String())
+	}
+
+	var stillThere int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sip_accounts WHERE local_uid = 200 AND extension = '2000'`).Scan(&stillThere); err != nil {
+		t.Fatalf("verify survival: %v", err)
+	}
+	if stillThere != 1 {
+		t.Fatalf("tenant-2's SIP account was modified or deleted by a tenant-1 admin -- real cross-tenant breach")
+	}
+
+	// Regression: same-tenant upsert (uid 100, tenant 1, WITH a matching local_users row) must
+	// still succeed -- proving the fix didn't just make every admin action 404.
+	sameTenantBody, _ := json.Marshal(map[string]any{"extension": "1001", "sip_server": "x", "sip_port": 5060})
+	sameTenantReq := httptest.NewRequest(http.MethodPut, "/api/v1/sip-accounts/100", bytes.NewReader(sameTenantBody))
+	sameTenantReq.Header.Set("Authorization", "Bearer "+adminToken)
+	sameTenantRR := httptest.NewRecorder()
+	h.ServeHTTP(sameTenantRR, sameTenantReq)
+	if sameTenantRR.Code != http.StatusOK {
+		t.Fatalf("tenant-1 admin upsert on own tenant's uid: status = %d, body = %s, want 200", sameTenantRR.Code, sameTenantRR.Body.String())
 	}
 }

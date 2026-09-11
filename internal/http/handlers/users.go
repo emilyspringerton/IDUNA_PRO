@@ -772,6 +772,23 @@ func callerTenantID(r *http.Request) int {
 	return 1
 }
 
+// localUserTenantID -- MULTI_TENANCY_NORTHSTAR.md Phase 2: looks up a target uid's REAL tenant
+// directly from local_users, the authoritative source of truth. Needed anywhere a caller is about
+// to act on a uid that doesn't necessarily have an existing row of its own yet to check a
+// tenant_id against (e.g. sip_accounts.upsert, an insert-or-update) -- local_users always has the
+// row already, since every real uid was created through userlog.UserProjector. Returns ok=false
+// if the uid doesn't exist at all (never a partial/zero-value tenant to accidentally trust).
+func localUserTenantID(ctx context.Context, db *sql.DB, uid int) (tenantID int, ok bool) {
+	if db == nil {
+		return 0, false
+	}
+	err := db.QueryRowContext(ctx, `SELECT tenant_id FROM local_users WHERE local_uid = ?`, uid).Scan(&tenantID)
+	if err != nil {
+		return 0, false
+	}
+	return tenantID, true
+}
+
 // orgsShareCluster -- CP-HIPAA-3 (founder real-time: "there may be a several organizations who
 // have service agreements with each other... the admins from that collective should be able to
 // administer participants from that cluster of providers... we will assume the provider cluster
