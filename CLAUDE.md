@@ -120,6 +120,16 @@ honest note that the live Vertex network call itself wasn't exercised end to end
 (no active `gcloud` account here) — closed instead with real, network-free unit coverage of the
 response-parsing logic plus a live-reverified fresh-SQLite boot.
 
+**Real, spec-only pass, 2026-09-11 — the real, checked gap this repo has to close next.**
+Founder real-time: "idunapro needs to become truely multi tenant currently its just a fork of
+iduna for carepyre." Checked directly, confirmed true: zero `tenant_id` anywhere in
+`internal/store`, ten `.go` files hardcode `carepyre`/`CarePyre` by name, one process/one SQLite
+file/one JWT key for everyone. `docs/MULTI_TENANCY_NORTHSTAR.md` names the real, sequenced plan
+(a `tenants` table, `tenant_id` on every tenant-owned table, a JWT `tenant_id` claim, per-tenant
+config replacing hardcoded constants) — named as the literal Phase 0 for the sharpened Emily For
+Business pitch ("the Rails for 2026 agents is an API that lets you create APIs," see
+`IDUNA/docs/EMILY_FOR_BUSINESS_NORTHSTAR.md`'s own same-day update). No code yet.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),
