@@ -167,6 +167,34 @@ real password. `go build`/`go vet`/`go test ./...` all clean. Remaining Phase 2 
 yet audited: `resumes`/`resume_targets`/`community_tools`, `gdpr_requests` (`?all=1` residual),
 `branding_settings`, `compliance_recordings`.
 
+**Real, shipped same day, continued: Multi-Tenancy Phase 2's second slice — `gdpr_requests`.**
+Closed the `?all=1` metadata residual Phase 1 had named but under-scoped: re-inspecting
+`GDPRHandler.download()` found it served the actual completed EXPORT FILE (full profile + event
+history + extension data, not just metadata) to any `users.admin` caller by guessable sequential
+request id, with zero tenant check. Fixed with a new `tenant_id` column (migration
+`202609111002_gdpr_requests_tenant_id.sql`, backfilled via a real join to `local_users.tenant_id`),
+`gdpr.ListRequests` now takes and filters by `tenantID`, and `download()` checks the row's own
+`tenant_id` against the caller's before the admin bypass — same 404-not-403 idiom. New adversarial
+tests (`TestGDPRHandler_DownloadCrossTenantExportReturns404`,
+`TestGDPRHandler_ListRequestsAllScopedToCallerTenant`) plus live verification against the real
+running binary. `branding_settings`/`compliance_recordings` explicitly named as NOT Phase-2-shaped
+(per-instance singletons, hardcoded `id=1` — a Phase 3 redesign, not an admin-bypass fix).
+
+**Real, honest incident during this same pass, found and fully contained:** an earlier throwaway
+live-verification boot (for the mail/SIP slice) set `IDUNA_PRO_ROOT` to this real repo's own path
+while only isolating `SQLITE_PATH` -- `main.go`'s event-log directory derives from
+`IDUNA_PRO_ROOT`, not `SQLITE_PATH`, so two fake test-registration events (`admin1@example.test`,
+`user-b@example.test`) were appended to the REAL production event log. A later, unrelated
+production restart (deploying the mail/SIP fix) replayed those pending events into the real
+production `local_users` table. Caught immediately by cross-checking prod after the fact: both
+fake accounts had `is_admin=0` and zero references from any other real table (no privilege
+escalation, no data corruption) -- removed directly from production `local_users` (safe per
+`cmd/admin-grant`'s own documented "projector never rebuilds from scratch" property: a forward-only
+projector cursor never resurrects a directly-deleted row). Confirmed clean via a full service
+restart afterward. Fixed process going forward: any throwaway live-verification boot must fully
+isolate `IDUNA_PRO_ROOT` to a `/tmp` directory (with `migrations/truestore` symlinked in read-only)
+alongside `SQLITE_PATH` -- not just the database file.
+
 **Real, shipped since (2026-09-07, SAGA audit catch-up)** — this Status section had fallen behind
 the repo's own real scope; see `README.md`'s own matching catch-up section for the full writeup:
 organizations/cluster trust model (`organizations.go`), white-label branding (`branding.go`),

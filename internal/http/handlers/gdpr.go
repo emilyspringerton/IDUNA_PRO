@@ -135,7 +135,7 @@ func (h *GDPRHandler) listRequests(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		reqs, err := gdpr.ListRequests(r.Context(), h.Deps.DB)
+		reqs, err := gdpr.ListRequests(r.Context(), h.Deps.DB, callerTenantID(r))
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -158,18 +158,28 @@ func (h *GDPRHandler) listRequests(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *GDPRHandler) download(w http.ResponseWriter, r *http.Request, id int64) {
-	var localUID int
+	var localUID, rowTenantID int
 	var status, exportPath string
 	err := h.Deps.DB.QueryRowContext(r.Context(),
-		`SELECT local_uid, status, COALESCE(export_path,'') FROM gdpr_requests WHERE id = ? AND request_type = 'export'`,
+		`SELECT local_uid, status, COALESCE(export_path,''), tenant_id FROM gdpr_requests WHERE id = ? AND request_type = 'export'`,
 		id,
-	).Scan(&localUID, &status, &exportPath)
+	).Scan(&localUID, &status, &exportPath, &rowTenantID)
 	if err == sql.ErrNoRows {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	// MULTI_TENANCY_NORTHSTAR.md Phase 2: the real tenant boundary, checked BEFORE the admin
+	// bypass below and for every caller -- this is a REAL exported PII FILE, not just metadata
+	// (see ListRequests's own doc comment for why this got the full fix). Same 404-not-403 idiom:
+	// a cross-tenant probe by request id gets byte-for-byte the same response as a genuinely
+	// nonexistent id.
+	if rowTenantID != callerTenantID(r) {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 

@@ -56,6 +56,7 @@ func setupDeps(t *testing.T) (gdpr.Deps, *sql.DB) {
 			export_path    VARCHAR(500),
 			result_summary TEXT,
 			error_message  TEXT,
+			tenant_id      INTEGER  NOT NULL DEFAULT 1,
 			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			completed_at   DATETIME
 		);
@@ -208,7 +209,7 @@ func TestListRequests_ScopesByUser(t *testing.T) {
 		t.Fatalf("expected exactly 1 request for uid 5, got %d", len(mine))
 	}
 
-	all, err := gdpr.ListRequests(context.Background(), db)
+	all, err := gdpr.ListRequests(context.Background(), db, 1)
 	if err != nil {
 		t.Fatalf("ListRequests: %v", err)
 	}
@@ -255,7 +256,7 @@ func TestExport_CrossTenantTargetReturnsErrNotFound(t *testing.T) {
 	// Real, decisive proof this didn't even leave a trace: no gdpr_requests row at all for the
 	// cross-tenant attempt, matching verifyTenantMembership's own "checked before createRequest"
 	// design (a cross-tenant probe should look identical to never having happened).
-	all, lerr := gdpr.ListRequests(context.Background(), deps.DB)
+	all, lerr := gdpr.ListRequests(context.Background(), deps.DB, 1)
 	if lerr != nil {
 		t.Fatalf("ListRequests: %v", lerr)
 	}

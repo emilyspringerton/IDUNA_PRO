@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,7 @@ func newTestGDPRHandler(t *testing.T, keys *jwt.Keys) (http.Handler, *sql.DB) {
 			export_path    VARCHAR(500),
 			result_summary TEXT,
 			error_message  TEXT,
+			tenant_id      INTEGER  NOT NULL DEFAULT 1,
 			created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			completed_at   DATETIME
 		);
@@ -304,5 +306,113 @@ func TestGDPRHandler_AdminCannotActOnCrossTenantUser(t *testing.T) {
 	}
 	if email != "tenant2@example.com" {
 		t.Fatalf("expected the cross-tenant user's real email to survive untouched, got %q", email)
+	}
+}
+
+// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): the real adversarial test for the residual
+// this session's own Phase 1 pass had named but under-scoped -- re-inspection found download()
+// served the actual completed export FILE, not just metadata, with zero tenant check for a
+// users.admin caller. A tenant-2 user's own export must not be downloadable by a tenant-1 admin.
+func TestGDPRHandler_DownloadCrossTenantExportReturns404(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	h, db := newTestGDPRHandler(t, keys)
+
+	log, err := userlog.NewFileEventLog(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileEventLog: %v", err)
+	}
+	t.Cleanup(func() { log.Close() })
+	proj := userlog.NewSQLiteProjector(db)
+	rec, err := log.Append(context.Background(), userlog.Event{
+		ID:   "e3",
+		Type: userlog.EventUserCreated,
+		Data: mustJSONGDPR(t, userlog.UserCreatedData{LocalUID: 3, Email: "tenant2@example.com", TenantID: 2}),
+	})
+	if err != nil {
+		t.Fatalf("seed uid3 (tenant 2): %v", err)
+	}
+	if err := proj.Apply(context.Background(), rec[0]); err != nil {
+		t.Fatalf("apply uid3 seed: %v", err)
+	}
+
+	// Tenant-2's own uid 3 self-exports -- a real, completed export request under tenant 2.
+	tenant2Token := tenantToken(t, keys, 3, 2)
+	exportReq := httptest.NewRequest(http.MethodPost, "/api/v1/gdpr/export", nil)
+	exportReq.Header.Set("Authorization", "Bearer "+tenant2Token)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, exportReq)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tenant-2 self-export: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp gdpr.Request
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	downloadPath := "/api/v1/gdpr/requests/" + strconv.FormatInt(resp.ID, 10) + "/download"
+
+	// A tenant-1 admin (no tenant_id claim -> callerTenantID's real "default to 1" fallback) tries
+	// to download tenant-2's completed export file by its (small, sequential, guessable) id.
+	tenant1AdminToken := gdprToken(t, keys, 1, "users.admin")
+	crossReq := httptest.NewRequest(http.MethodGet, downloadPath, nil)
+	crossReq.Header.Set("Authorization", "Bearer "+tenant1AdminToken)
+	crossRR := httptest.NewRecorder()
+	h.ServeHTTP(crossRR, crossReq)
+	if crossRR.Code != http.StatusNotFound {
+		t.Fatalf("tenant-1 admin downloading tenant-2's export: status = %d, body = %s, want 404 (real cross-tenant PII leak if not)", crossRR.Code, crossRR.Body.String())
+	}
+	if strings.Contains(crossRR.Body.String(), "tenant2@example.com") {
+		t.Fatalf("tenant-2's real exported PII leaked into a 404 response body: %s", crossRR.Body.String())
+	}
+
+	// Regression: tenant-2's own caller can still download their own export.
+	ownReq := httptest.NewRequest(http.MethodGet, downloadPath, nil)
+	ownReq.Header.Set("Authorization", "Bearer "+tenant2Token)
+	ownRR := httptest.NewRecorder()
+	h.ServeHTTP(ownRR, ownReq)
+	if ownRR.Code != http.StatusOK {
+		t.Fatalf("tenant-2 downloading their own export: status = %d, body = %s, want 200", ownRR.Code, ownRR.Body.String())
+	}
+}
+
+// TestGDPRHandler_ListRequestsAllScopedToCallerTenant -- the other half of the same residual:
+// ?all=1 must never surface another tenant's request metadata (which local_uid requested what,
+// when) to an admin outside that tenant.
+func TestGDPRHandler_ListRequestsAllScopedToCallerTenant(t *testing.T) {
+	keys, _ := jwt.GenerateKeys()
+	h, db := newTestGDPRHandler(t, keys)
+
+	// uid 1/2 are already seeded under tenant 1 by newTestGDPRHandler. Insert a real tenant-2
+	// request directly (mirrors how a genuine second tenant's data already exists in production).
+	if _, err := db.Exec(`INSERT INTO gdpr_requests (local_uid, request_type, status, requested_by, tenant_id) VALUES (99, 'export', 'completed', 99, 2)`); err != nil {
+		t.Fatalf("seed tenant-2 request: %v", err)
+	}
+
+	tenant1Token := gdprToken(t, keys, 1, "users.admin")
+	own := httptest.NewRequest(http.MethodPost, "/api/v1/gdpr/export", nil)
+	own.Header.Set("Authorization", "Bearer "+tenant1Token)
+	ownRR := httptest.NewRecorder()
+	h.ServeHTTP(ownRR, own)
+	if ownRR.Code != http.StatusOK {
+		t.Fatalf("tenant-1 self-export (to have a real tenant-1 row to find): status = %d, body = %s", ownRR.Code, ownRR.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/gdpr/requests?all=1", nil)
+	listReq.Header.Set("Authorization", "Bearer "+tenant1Token)
+	listRR := httptest.NewRecorder()
+	h.ServeHTTP(listRR, listReq)
+	if listRR.Code != http.StatusOK {
+		t.Fatalf("?all=1: status = %d, body = %s", listRR.Code, listRR.Body.String())
+	}
+	var all []gdpr.Request
+	if err := json.Unmarshal(listRR.Body.Bytes(), &all); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, req := range all {
+		if req.LocalUID == 99 {
+			t.Fatalf("tenant-1 admin's ?all=1 surfaced a tenant-2 request (local_uid 99) -- real cross-tenant metadata leak: %+v", all)
+		}
+	}
+	if len(all) == 0 {
+		t.Fatalf("expected at least the real tenant-1 request to be visible, got none")
 	}
 }

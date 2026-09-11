@@ -174,10 +174,21 @@ at all on an admin's own on-behalf-of target) was found and closed in the same p
 always add a new one), each with its own real cross-tenant-read-refused test, not a bulk
 find-and-replace trusted without per-table verification. **First slice DONE (2026-09-11):**
 `mail_account_credentials` + `sip_accounts` — see the status update above for the full writeup.
-Remaining known tenant-owned tables not yet touched: `resumes`/`resume_targets`/`community_tools`
-(Community Tools feature), `gdpr_requests` (`ListRequests`'s own `?all=1` residual, named but not
-fixed in the GDPR pass), `branding_settings`, `compliance_recordings`. Not yet audited for the
-same "admin bypasses everything" shape — check each individually before assuming it's clean.
+**Second slice DONE (2026-09-11):** `gdpr_requests` — closed the `?all=1` metadata residual named
+in the Phase 1 pass, and found it was actually worse than documented: `GDPRHandler.download()`
+served the real, completed export FILE (not just request metadata) to any `users.admin` caller by
+guessable sequential id, with zero tenant check at all. Fixed the same way: new `tenant_id` column
+(migration `202609111002`, backfilled via the same real join to `local_users.tenant_id`),
+`ListRequests` now takes and filters by `tenantID`, `download()` checks the row's own `tenant_id`
+against the caller's before the admin bypass. New adversarial tests
+(`TestGDPRHandler_DownloadCrossTenantExportReturns404`,
+`TestGDPRHandler_ListRequestsAllScopedToCallerTenant`) plus live verification against the real
+running binary. Remaining known tenant-owned tables not yet touched: `resumes`/`resume_targets`/
+`community_tools` (Community Tools feature). Real, honest, explicitly NOT Phase-2-shaped (these are
+per-INSTANCE singletons by design, hardcoded `id=1` — every tenant currently shares one row; making
+them per-tenant is a Phase 3 "per-tenant configuration" redesign, not an admin-bypass bug fix, and
+forcing a quick `tenant_id` retrofit onto a singleton would misrepresent the actual gap):
+`branding_settings`, `compliance_recordings`.
 
 **Phase 3 — per-tenant configuration** (domain/branding/feature flags), replacing the hardcoded
 `carepyre`/`CarePyre` references named above one at a time — CarePyre itself becomes tenant #1 in

@@ -101,7 +101,7 @@ func Export(ctx context.Context, deps Deps, tenantID, localUID, requestedBy int,
 		return nil, err
 	}
 
-	req, err := createRequest(ctx, deps.DB, localUID, "export", requestedBy)
+	req, err := createRequest(ctx, deps.DB, tenantID, localUID, "export", requestedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +145,7 @@ func Delete(ctx context.Context, deps Deps, tenantID, localUID, requestedBy int)
 		return nil, err
 	}
 
-	req, err := createRequest(ctx, deps.DB, localUID, "delete", requestedBy)
+	req, err := createRequest(ctx, deps.DB, tenantID, localUID, "delete", requestedBy)
 	if err != nil {
 		return nil, err
 	}
@@ -180,10 +180,10 @@ func Delete(ctx context.Context, deps Deps, tenantID, localUID, requestedBy int)
 	return req, nil
 }
 
-func createRequest(ctx context.Context, db *sql.DB, localUID int, requestType string, requestedBy int) (*Request, error) {
+func createRequest(ctx context.Context, db *sql.DB, tenantID, localUID int, requestType string, requestedBy int) (*Request, error) {
 	res, err := db.ExecContext(ctx,
-		`INSERT INTO gdpr_requests (local_uid, request_type, status, requested_by) VALUES (?, ?, 'pending', ?)`,
-		localUID, requestType, requestedBy)
+		`INSERT INTO gdpr_requests (local_uid, request_type, status, requested_by, tenant_id) VALUES (?, ?, 'pending', ?, ?)`,
+		localUID, requestType, requestedBy, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("gdpr: create request row: %w", err)
 	}
@@ -205,16 +205,20 @@ func failRequest(ctx context.Context, db *sql.DB, req *Request, cause error) (*R
 	return req, nil
 }
 
-// ListRequests returns every GDPR request, newest first (admin view / audit trail).
+// ListRequests returns every GDPR request within tenantID's own tenant, newest first (admin view
+// / audit trail).
 //
-// Real, honest, accepted residual (MULTI_TENANCY_NORTHSTAR.md Phase 1, 2026-09-11): this is NOT
-// tenant-scoped -- gdpr_requests has no tenant_id column of its own (out of this phase's
-// deliberately one-table scope), so a tenant-A users.admin holder calling this still sees every
-// OTHER tenant's request metadata too (which local_uid requested what, when, status) -- not the
-// PII values themselves, which stay real, tenant-scoped-and-verified via Export/Delete above.
-// Named directly as a real, deferred Phase 2 gap, not silently left unaddressed.
-func ListRequests(ctx context.Context, db *sql.DB) ([]Request, error) {
-	return queryRequests(ctx, db, `SELECT id, local_uid, request_type, status, requested_by, COALESCE(export_path,''), COALESCE(result_summary,''), COALESCE(error_message,''), created_at, COALESCE(completed_at,'') FROM gdpr_requests ORDER BY id DESC`)
+// MULTI_TENANCY_NORTHSTAR.md Phase 2 (2026-09-11): this WAS a real, named residual from Phase 1
+// ("gdpr_requests has no tenant_id column, so ?all=1 leaks every tenant's request metadata") --
+// re-inspecting GDPRHandler.download() found the actual exposure was worse than "metadata only"
+// (download() served the real, completed export FILE with zero tenant check for a users.admin
+// caller), so this got the full fix rather than staying an accepted gap: gdpr_requests now has its
+// own real tenant_id column (migration 202609111002), backfilled via a real join to
+// local_users.tenant_id.
+func ListRequests(ctx context.Context, db *sql.DB, tenantID int) ([]Request, error) {
+	return queryRequests(ctx, db,
+		`SELECT id, local_uid, request_type, status, requested_by, COALESCE(export_path,''), COALESCE(result_summary,''), COALESCE(error_message,''), created_at, COALESCE(completed_at,'') FROM gdpr_requests WHERE tenant_id = ? ORDER BY id DESC`,
+		tenantID)
 }
 
 // ListRequestsForUser returns a specific user's own requests, newest first (self-service view).
