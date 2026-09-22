@@ -439,6 +439,24 @@ func main() {
 	// route above still enforces community-tools.access same as before.
 	mux.Handle("/api/v1/community-tools/openapi.json", &handlers.CommunityToolsOpenAPIHandler{})
 
+	// Business card tools (founder real-time, 2026-09-22: "in carepyre if there is a resume
+	// configured can we generate some business card tools powered by the qr code stuff port it
+	// to IDUNAPRO") -- see qr.go's/business_card.go's own doc comments for the full design.
+	// Dynamic QR code registry, ported field-for-field from IDUNA.
+	qrH := &handlers.QRHandler{DB: db, BaseURL: baseURL}
+	qrAdminProtected := middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(qrH))
+	mux.Handle("/admin/qr/api/codes", qrAdminProtected)
+	mux.Handle("/admin/qr/api/codes/", qrAdminProtected)
+	mux.Handle("/admin/qr", middleware.RequireCookieAuth(keys, iamStore, "/admin/login", handlers.AdminSessionTTL)(middleware.RequirePermission("iduna.admin")(&handlers.QRPageHandler{})))
+	qrRedirectH := &handlers.QRRedirectHandler{DB: db, BaseURL: baseURL}
+	mux.Handle("/q/", qrRedirectH)
+
+	businessCardH := &handlers.BusinessCardHandler{DB: db, QR: qrH, PublicBaseURL: baseURL}
+	businessCardProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("community-tools.access")(businessCardH))
+	mux.Handle("/api/v1/community-tools/business-card", businessCardProtected)
+	// Public -- the real thing a phone camera hits after scanning the QR code above.
+	mux.Handle("/card/", &handlers.BusinessCardVCardHandler{DB: db})
+
 	// CP-COMPLIANCE-REC-1: both routes are compliance.recording.manage-gated.
 	complianceRecH := &handlers.ComplianceRecordingHandler{DB: db}
 	complianceRecProtected := middleware.RequireAuth(keys)(middleware.RequirePermission("compliance.recording.manage")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

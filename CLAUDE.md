@@ -202,6 +202,26 @@ compliance-recording storage (`compliance_recording.go`), the GDPR export/erasur
 (`internal/gdpr/`), and the 4-tier RBAC model (Top Admin/Operator Admin/Provider Admin/Provider
 Operator). All live-routed in `main.go`, all with real tests.
 
+**Real, shipped (2026-09-22): dynamic QR code registry + Community Tools business cards.**
+Founder real-time: "we need to integrate the model repository with git lfs..." (IDUNA-side, not
+this repo) then "in carepyre if there is a resume configured can we generate some business card
+tools powered by the qr code stuff port it to IDUNAPRO." Ported IDUNA's own `qr.go`/`qr_page.go`
+field-for-field (`/admin/qr`, `/admin/qr/api/codes`, public `/q/{slug}` + `/q/{slug}.png`) —
+every QR image encodes this server's own stable redirect URL, so retargeting a code repoints
+every already-printed copy with zero reprinting. New `BusinessCardHandler`
+(`POST /api/v1/community-tools/business-card`, `community-tools.access`-gated): if the caller has
+a real resume configured (`basics.name` non-empty — an empty shell doesn't count), upserts one
+deterministic QR code per user (`card-<uid>`) pointing at a new public
+`GET /card/{uid}.vcf` — a real, RFC-6350-shaped vCard 3.0 document rendered live from their saved
+resume `basics`, escaped per spec. Scanning the code offers "Add Contact" on real phone camera
+apps. 6 new business-card tests + the full ported QR test suite (11 tests), all passing. Live-
+verified end to end against a fully-isolated throwaway boot (`IDUNA_PRO_ROOT` AND `SQLITE_PATH`
+both pointed at `/tmp`, per this file's own documented incident/fix above — never repeat that
+mistake): real register → resume save → business-card create → real 512×512 QR PNG → 302 redirect
+→ real downloadable vCard, all round-tripped correctly. Deployed to production (backed up first),
+health check green, both new public routes (`/q/`, `/card/`) confirmed live via harmless 404
+probes (no real data touched).
+
 ## Stack
 
 Go 1.25, `GOWORK=off` (standalone module, not part of the monorepo's `go.work`) — same real,
